@@ -7,6 +7,8 @@ import ResumeModal from './components/ResumeModal';
 import SettingsModal from './components/SettingsModal';
 import HunterLogsModal from './components/HunterLogsModal';
 import AutoApplyModal from './components/AutoApplyModal';
+import AnalyticsModal from './components/AnalyticsModal';
+import InterviewPrepModal from './components/InterviewPrepModal';
 import { api, WS_BASE } from './api';
 import { Bell, Sparkles, CheckCircle2, AlertCircle } from 'lucide-react';
 
@@ -22,7 +24,9 @@ export default function App() {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showLogsModal, setShowLogsModal] = useState(false);
   const [showAutoApplyModal, setShowAutoApplyModal] = useState(false);
+  const [showAnalyticsModal, setShowAnalyticsModal] = useState(false);
   const [tailorJob, setTailorJob] = useState(null);
+  const [prepJob, setPrepJob] = useState(null);
   
   // Status states
   const [isSearching, setIsSearching] = useState(false);
@@ -278,6 +282,7 @@ export default function App() {
         onOpenResume={() => setShowResumeModal(true)}
         onOpenSettings={() => setShowSettingsModal(true)}
         onOpenLogs={() => setShowLogsModal(true)}
+        onOpenAnalytics={() => setShowAnalyticsModal(true)}
         onOpenAutoApply={() => setShowAutoApplyModal(true)}
         onTriggerSearch={handleTriggerSearch}
         isSearching={isSearching}
@@ -317,6 +322,7 @@ export default function App() {
           onStatusChange={handleStatusChange}
           onDeleteJob={handleDeleteJob}
           onOpenTailor={(job) => setTailorJob(job)}
+          onOpenInterviewPrep={(job) => setPrepJob(job)}
           onOpenAutoApply={() => setShowAutoApplyModal(true)}
           onRefreshJobs={loadJobs}
           isLoading={isLoading}
@@ -328,6 +334,13 @@ export default function App() {
         <TailorModal
           job={tailorJob}
           onClose={() => setTailorJob(null)}
+        />
+      )}
+
+      {prepJob && (
+        <InterviewPrepModal
+          job={prepJob}
+          onClose={() => setPrepJob(null)}
         />
       )}
 
@@ -364,6 +377,12 @@ export default function App() {
           isOpen={showAutoApplyModal}
           onClose={() => setShowAutoApplyModal(false)}
           onRefreshJobs={loadJobs}
+        />
+      )}
+
+      {showAnalyticsModal && (
+        <AnalyticsModal
+          onClose={() => setShowAnalyticsModal(false)}
         />
       )}
 

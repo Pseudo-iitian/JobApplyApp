@@ -45,8 +45,9 @@ export default function AutoApplyModal({ isOpen, onClose, onRefreshJobs }) {
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
-  const EXTENSION_PATH = "/home/abhishek_verma/Desktop/JobApplyApp/extension";
-  const BOOKMARKLET_CODE = `javascript:(function(){if(window.__JOBAPPLY_INJECTED__){const f=document.getElementById('jobapply-autofill-fab');if(f){f.click();return;}}const s=document.createElement('script');s.src='http://localhost:8000/extension/content.js?v='+Date.now();const c=document.createElement('link');c.rel='stylesheet';c.href='http://localhost:8000/extension/content.css?v='+Date.now();document.head.appendChild(c);document.body.appendChild(s);setTimeout(()=>{const f=document.getElementById('jobapply-autofill-fab');if(f)f.click();},350);})();`;
+  const backendHost = typeof window !== "undefined" && window.location ? `${window.location.protocol}//${window.location.hostname}:8000` : "http://localhost:8000";
+  const EXTENSION_PATH = "<cloned_directory>/JobApplyApp/extension";
+  const BOOKMARKLET_CODE = `javascript:(function(){if(window.__JOBAPPLY_INJECTED__){const f=document.getElementById('jobapply-autofill-fab');if(f){f.click();return;}}const s=document.createElement('script');s.src='${backendHost}/extension/content.js?v='+Date.now();const c=document.createElement('link');c.rel='stylesheet';c.href='${backendHost}/extension/content.css?v='+Date.now();document.head.appendChild(c);document.body.appendChild(s);setTimeout(()=>{const f=document.getElementById('jobapply-autofill-fab');if(f)f.click();},350);})();`;
 
   useEffect(() => {
     if (isOpen) {

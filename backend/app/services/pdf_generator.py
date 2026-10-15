@@ -23,7 +23,9 @@ def generate_tailored_resume_pdf(
     Generates a clean, modern, single-column ATS-compliant PDF resume tailored for a specific job.
     Returns the generated PDF file path.
     """
-    file_name = f"Abhishek_Verma_Tailored_Resume_{job_id}_{target_company.replace(' ', '_')}.pdf"
+    safe_cand = candidate_name.strip().replace(" ", "_").replace("/", "_")
+    safe_company = target_company.strip().replace(" ", "_").replace("/", "_")
+    file_name = f"{safe_cand}_Tailored_Resume_{job_id}_{safe_company}.pdf"
     file_path = os.path.join(UPLOAD_DIR, file_name)
 
     doc = SimpleDocTemplate(

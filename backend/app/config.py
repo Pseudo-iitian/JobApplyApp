@@ -24,7 +24,13 @@ class Settings(BaseSettings):
     
     # LLM Settings
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     
+    # Instant Alert Webhooks (Optional)
+    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    DISCORD_WEBHOOK_URL: str = os.getenv("DISCORD_WEBHOOK_URL", "")
+
     # Scraping & Scheduler Settings
     SCRAPE_INTERVAL_MINUTES: int = 5
     DEFAULT_KEYWORDS: str = "Java Developer, Spring Boot, Microservices"

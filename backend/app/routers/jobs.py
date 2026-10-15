@@ -35,6 +35,54 @@ def get_hunter_status():
         "logs": recent_logs[-40:],
     }
 
+@router.get("/analytics")
+def get_job_analytics(db: Session = Depends(get_db)):
+    """Provides high-level ATS funnel analytics, platform distribution, and response rates."""
+    from sqlalchemy import func
+    from datetime import datetime, timedelta
+
+    total_jobs = db.query(func.count(Job.id)).scalar() or 0
+
+    status_counts_raw = db.query(Job.status, func.count(Job.id)).group_by(Job.status).all()
+    status_counts = {s: 0 for s in ["DISCOVERED", "APPLIED", "SCREENING", "INTERVIEWING", "OFFER", "REJECTED"]}
+    for status_name, count in status_counts_raw:
+        if status_name in status_counts:
+            status_counts[status_name] = count
+
+    source_counts_raw = (
+        db.query(Job.source, func.count(Job.id))
+        .group_by(Job.source)
+        .order_by(func.count(Job.id).desc())
+        .limit(10)
+        .all()
+    )
+    sources = [{"source": s or "Direct", "count": c} for s, c in source_counts_raw]
+
+    avg_score = db.query(func.avg(Job.match_score)).scalar() or 0.0
+    high_match_count = db.query(func.count(Job.id)).filter(Job.match_score >= 80).scalar() or 0
+
+    direct_contact_count = db.query(func.count(Job.id)).filter(
+        ((Job.hr_email != None) & (Job.hr_email != "")) |
+        ((Job.google_form_url != None) & (Job.google_form_url != ""))
+    ).scalar() or 0
+
+    since_24h = datetime.utcnow() - timedelta(hours=24)
+    discovered_24h = db.query(func.count(Job.id)).filter(Job.created_at >= since_24h).scalar() or 0
+
+    since_7d = datetime.utcnow() - timedelta(days=7)
+    discovered_7d = db.query(func.count(Job.id)).filter(Job.created_at >= since_7d).scalar() or 0
+
+    return {
+        "total_jobs": total_jobs,
+        "status_counts": status_counts,
+        "sources": sources,
+        "average_match_score": round(float(avg_score), 1),
+        "high_match_count": high_match_count,
+        "direct_contact_count": direct_contact_count,
+        "discovered_last_24h": discovered_24h,
+        "discovered_last_7d": discovered_7d,
+    }
+
 @router.post("/trigger-search")
 async def trigger_manual_search(db: Session = Depends(get_db)):
     """Triggers an instant job search cycle immediately."""
@@ -124,7 +172,9 @@ async def submit_discovered_linkedin_post(post_in: DiscoveredPostIn, db: Session
     if not is_job_recent(posted_date_str, max_days=3):
         raise HTTPException(status_code=400, detail=f"Ineligible posting date: '{posted_date_str}' exceeds 3 days limit.")
 
-    eligible, exp_val, exp_label, exp_reason = evaluate_experience_eligibility(title, desc, max_candidate_exp=2.0)
+    eligible, exp_val, exp_label, exp_reason = evaluate_experience_eligibility(
+        title, desc, company=company, location=post_in.location or "", max_candidate_exp=2.0
+    )
     if not eligible:
         raise HTTPException(status_code=400, detail=f"Ineligible experience requirement: {exp_reason}")
     
@@ -347,10 +397,10 @@ def download_tailored_resume(job_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Job not found")
 
     config = db.query(SearchConfig).first()
-    name = config.full_name if config else "Abhishek Verma"
-    phone = config.phone if config else "+91-6307801566"
-    email = config.email if config else "abhishek.verma.6561@gmail.com"
-    contact_line = f"Noida, India | {phone} | {email} | linkedin.com/in/1-abhishek-verma | github.com/Pseudo-iitian"
+    name = (config and config.full_name) or "Candidate Name"
+    phone = (config and config.phone) or "+91-9876543210"
+    email = (config and config.email) or "candidate@example.com"
+    contact_line = f"India | {phone} | {email}"
 
     resume = db.query(Resume).filter(Resume.is_active == True).first()
     resume_text = resume.raw_text if resume else "Backend Software Engineer with 2 years experience in Java, Spring Boot, Microservices."
@@ -378,8 +428,25 @@ def download_tailored_resume(job_id: int, db: Session = Depends(get_db)):
     )
 
     safe_company = job.company.replace(" ", "_").replace("/", "_")
+    safe_name = name.replace(" ", "_").replace("/", "_")
     return FileResponse(
         pdf_path,
         media_type="application/pdf",
-        filename=f"Abhishek_Verma_Tailored_Resume_{safe_company}.pdf"
+        filename=f"{safe_name}_Tailored_Resume_{safe_company}.pdf"
     )
+
+@router.post("/{job_id}/interview-prep")
+async def get_interview_prep(job_id: int, db: Session = Depends(get_db)):
+    """Generates an AI-powered 1-page interview prep cheat sheet customized for this specific job."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from app.services.llm_service import generate_interview_prep_ai
+    prep_data = await generate_interview_prep_ai(
+        job_title=job.title,
+        company=job.company,
+        job_description=job.description or ""
+    )
+    return prep_data
+

@@ -4,6 +4,7 @@ import re
 import logging
 import hashlib
 import os
+import httpx
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Dict, Any, List, Optional
@@ -11,8 +12,10 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Use concrete model IDs instead of `*-latest` aliases. The aliases can resolve
-# to the same model and therefore the same exhausted quota bucket.
+# Groq Models for Ultra-Fast Inference (<300ms)
+GROQ_MODELS = ("openai/gpt-oss-20b", "qwen/qwen3.8-27b")
+
+# Use concrete model IDs instead of `*-latest` aliases for Gemini fallback
 DEFAULT_MODEL_CANDIDATES = (
     "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
@@ -45,6 +48,104 @@ if settings.GEMINI_API_KEY:
         logger.info(f"Gemini models loaded: {list(_initialized_models.keys())}")
     except Exception as e:
         logger.warning(f"Failed to initialize Gemini SDK: {e}")
+
+def generate_with_groq(prompt: str, json_mode: bool = False, system_prompt: Optional[str] = None) -> Optional[str]:
+    """Synchronous Groq call for sub-second inference."""
+    api_key = settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY", "")
+    if not api_key:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    elif json_mode:
+        messages.append({"role": "system", "content": "You are an expert technical evaluator. Respond ONLY in valid, parseable JSON."})
+    messages.append({"role": "user", "content": prompt})
+
+    for model in GROQ_MODELS:
+        try:
+            payload: Dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.1,
+            }
+            if json_mode:
+                payload["response_format"] = {"type": "json_object"}
+
+            with httpx.Client(timeout=7.0) as client:
+                resp = client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=headers,
+                    json=payload
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        content = choices[0].get("message", {}).get("content", "")
+                        if content:
+                            return content.strip()
+                elif resp.status_code == 429:
+                    logger.warning(f"Groq 429 rate limit on model {model}")
+                    continue
+        except Exception as e:
+            logger.debug(f"Groq sync call error on {model}: {e}")
+            continue
+    return None
+
+async def async_generate_with_groq(prompt: str, json_mode: bool = False, system_prompt: Optional[str] = None) -> Optional[str]:
+    """Non-blocking async Groq call for high-concurrency parallel evaluation."""
+    api_key = settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY", "")
+    if not api_key:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    elif json_mode:
+        messages.append({"role": "system", "content": "You are an expert technical evaluator. Respond ONLY in valid, parseable JSON."})
+    messages.append({"role": "user", "content": prompt})
+
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for model in GROQ_MODELS:
+            try:
+                payload: Dict[str, Any] = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.1,
+                }
+                if json_mode:
+                    payload["response_format"] = {"type": "json_object"}
+
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=headers,
+                    json=payload
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        content = choices[0].get("message", {}).get("content", "")
+                        if content:
+                            return content.strip()
+                elif resp.status_code == 429:
+                    logger.warning(f"Async Groq 429 rate limit on model {model}")
+                    continue
+            except Exception as e:
+                logger.debug(f"Async Groq error on {model}: {e}")
+                continue
+    return None
 
 def _is_quota_error(error_text: str) -> bool:
     lowered = error_text.lower()
@@ -88,10 +189,16 @@ def _pause_model(model_name: str, seconds: int, now: datetime) -> datetime:
 
 def generate_with_fallback(prompt: str) -> Optional[str]:
     """
-    Uses the first available Gemini model and falls back to older, concrete
-    versions after a quota or model-availability failure. Quota-exhausted
-    models are paused until the API's retry window to prevent request spam.
+    Tier 1: Try ultra-fast Groq inference (<300ms).
+    Tier 2: Try Gemini models with cooldown rotation.
+    Tier 3: Return None to activate local heuristic engine.
     """
+    # 1. Groq ultra-fast attempt
+    groq_res = generate_with_groq(prompt)
+    if groq_res:
+        return groq_res
+
+    # 2. Gemini fallback
     global _last_all_models_unavailable_log
 
     now = datetime.now(timezone.utc)
@@ -256,15 +363,22 @@ You are an expert technical recruiter evaluating job matches for a specific cand
 
 Candidate Profile:
 - Name: Abhishek Verma
-- Current Experience: Exactly 2.0 Years
+- Target Experience: Exactly 2.0 Years (Early Career / SDE 1 / Junior-to-Mid Backend Engineer)
 - Core Competency: Pure Backend Java Developer (Java 17, Spring Boot, Microservices, REST APIs, PostgreSQL, Docker).
-- Strict Eligibility Constraints:
-  1. STRICTLY Pure Backend Java only. ZERO Fullstack roles (if title or description requires Full Stack, Frontend, React, Angular, Vue, HTML/CSS as core requirement -> REJECT).
-  2. STRICT 2 YOE Experience Limit: Minimum required experience must be <= 2.0 years.
-     - ELIGIBLE: '0-2 yrs', '1-2 yrs', '1-3 yrs', '2 yrs', '2+ yrs', '2-4 yrs', '2-5 yrs' (a 2 YOE candidate qualifies).
-     - INELIGIBLE: '3+ yrs', '3-5 yrs', '3 to 6 yrs', '4+ yrs', '5+ yrs', '3-10 yrs', 'minimum 3 years' -> MUST REJECT!
-  3. STRICTLY NO Senior / Lead / Architect / SDE-2 / SDE-3 / SDE II / SDE III roles.
-  4. Must be India-based or Remote. Rejects overseas/foreign onsite jobs.
+
+Strict Rejection Criteria (If ANY of these apply, MUST set is_eligible = false):
+1. EXPERIENCE OVERQUALIFIED / SENIOR BRACKET:
+   - REJECT if minimum required experience is > 2.5 years (e.g. '3+ yrs', '4+ yrs', '5+ yrs', '6+ yrs', '7+ yrs', '8+ yrs', 'minimum 3 years').
+   - REJECT if wide senior experience range (e.g. '2-5 yrs', '2-6 yrs', '2-8 yrs', '3-5 yrs', '4-8 yrs', '5-10 yrs').
+   - ELIGIBLE ONLY IF tight early career bracket: '0-2 yrs', '1-2 yrs', '1-3 yrs', '2 yrs', '2+ yrs', '2-3 yrs', '2-4 yrs', '0-3 yrs'.
+2. SENIOR DESIGNATION IN TITLE OR DESCRIPTION:
+   - MUST REJECT: SDE-2, SDE-3, SDE-4, SDE II, SDE III, SDE IV, Software Engineer II, Software Engineer 2, Software Engineer 3, Software Engineer IV, Senior, Lead, Principal, Staff, Architect, Specialist, Consultant, Manager, VP, Director.
+3. NON-BACKEND / ROLE DRIFT:
+   - MUST REJECT: Fullstack (React/Angular/Vue/HTML/CSS), Frontend, SDET, QA, Automation Tester, Manual Testing, Data Engineer, Big Data, DevOps, SRE, Support Engineer.
+4. CONTRACT / TEMPORARY / WALK-IN:
+   - MUST REJECT: Contract-to-hire (C2H), 3rd party contract, Freelance, Physical Walk-in drives.
+5. NON-TECH FACTORY OR OVERSEAS:
+   - MUST REJECT: Non-tech agro/manufacturing factory roles (e.g. Saatvik Agro, Morena MP). Must be in India tech hubs (Bengaluru, Pune, Hyderabad, Gurgaon, Noida, NCR) or Remote.
 
 Job Posting:
 Title: {title}
@@ -277,7 +391,7 @@ Respond ONLY with valid JSON:
   "max_exp": float or null,
   "is_backend_only": true or false,
   "rejection_reason": "null or brief reason why candidate is not eligible",
-  "ats_score": integer between 70 and 98,
+  "ats_score": integer between 50 and 98,
   "hr_email": "string email or null",
   "google_form_or_apply_url": "url or null"
 }}
@@ -309,7 +423,76 @@ Respond ONLY with valid JSON:
 
 
 async def async_ai_evaluate_job_eligibility(title: str, description: str) -> Dict[str, Any]:
-    """Non-blocking async wrapper around ai_evaluate_job_eligibility using asyncio.to_thread."""
+    """
+    High-performance async evaluation:
+    1. Checks in-memory LRU cache (0ms).
+    2. Runs async Groq with json_mode (<300ms).
+    3. Falls back to thread-pooled Gemini / heuristics if Groq fails or unavailable.
+    """
+    cache_key = hashlib.sha256(f"{title}\n{description}".encode("utf-8")).hexdigest()
+    with _model_state_lock:
+        cached_result = _eligibility_cache.get(cache_key)
+    if cached_result:
+        return dict(cached_result)
+
+    prompt = f"""
+You are an expert technical recruiter evaluating job matches for a specific candidate.
+
+Candidate Profile:
+- Name: Abhishek Verma
+- Target Experience: Exactly 2.0 Years (Early Career / SDE 1 / Junior-to-Mid Backend Engineer)
+- Core Competency: Pure Backend Java Developer (Java 17, Spring Boot, Microservices, REST APIs, PostgreSQL, Docker).
+
+Strict Rejection Criteria (If ANY of these apply, MUST set is_eligible = false):
+1. EXPERIENCE OVERQUALIFIED / SENIOR BRACKET:
+   - REJECT if minimum required experience is > 2.5 years (e.g. '3+ yrs', '4+ yrs', '5+ yrs', '6+ yrs', '7+ yrs', '8+ yrs', 'minimum 3 years').
+   - REJECT if wide senior experience range (e.g. '2-5 yrs', '2-6 yrs', '2-8 yrs', '3-5 yrs', '4-8 yrs', '5-10 yrs').
+   - ELIGIBLE ONLY IF tight early career bracket: '0-2 yrs', '1-2 yrs', '1-3 yrs', '2 yrs', '2+ yrs', '2-3 yrs', '2-4 yrs', '0-3 yrs'.
+2. SENIOR DESIGNATION IN TITLE OR DESCRIPTION:
+   - MUST REJECT: SDE-2, SDE-3, SDE-4, SDE II, SDE III, SDE IV, Software Engineer II, Software Engineer 2, Software Engineer 3, Software Engineer IV, Senior, Lead, Principal, Staff, Architect, Specialist, Consultant, Manager, VP, Director.
+3. NON-BACKEND / ROLE DRIFT:
+   - MUST REJECT: Fullstack (React/Angular/Vue/HTML/CSS), Frontend, SDET, QA, Automation Tester, Manual Testing, Data Engineer, Big Data, DevOps, SRE, Support Engineer.
+4. CONTRACT / TEMPORARY / WALK-IN:
+   - MUST REJECT: Contract-to-hire (C2H), 3rd party contract, Freelance, Physical Walk-in drives.
+5. NON-TECH FACTORY OR OVERSEAS:
+   - MUST REJECT: Non-tech agro/manufacturing factory roles (e.g. Saatvik Agro, Morena MP). Must be in India tech hubs (Bengaluru, Pune, Hyderabad, Gurgaon, Noida, NCR) or Remote.
+
+Job Posting:
+Title: {title}
+Description: {description[:8000]}
+
+Respond ONLY with valid JSON:
+{{
+  "is_eligible": true or false,
+  "min_exp": float or null,
+  "max_exp": float or null,
+  "is_backend_only": true or false,
+  "rejection_reason": "null or brief reason why candidate is not eligible",
+  "ats_score": integer between 50 and 98,
+  "hr_email": "string email or null",
+  "google_form_or_apply_url": "url or null"
+}}
+"""
+    # 1. Try async Groq for sub-second response
+    if settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY"):
+        raw_groq = await async_generate_with_groq(prompt, json_mode=True)
+        if raw_groq:
+            clean = raw_groq.strip()
+            if clean.startswith("```json"):
+                clean = clean[7:]
+            if clean.startswith("```"):
+                clean = clean[3:]
+            if clean.endswith("```"):
+                clean = clean[:-3]
+            try:
+                data = json.loads(clean.strip())
+                data["ai_verified"] = True
+                data["ai_provider"] = "groq"
+                return _cache_eligibility_result(cache_key, data)
+            except Exception:
+                pass
+
+    # 2. Fall back to thread-pooled Gemini / heuristics
     return await asyncio.to_thread(ai_evaluate_job_eligibility, title, description)
 
 
@@ -389,3 +572,89 @@ def tailor_resume_ai(resume_text: str, job_title: str, company: str, job_descrip
     }
     _tailor_cache[cache_key] = fallback_result
     return fallback_result
+
+
+async def generate_interview_prep_ai(job_title: str, company: str, job_description: str) -> Dict[str, Any]:
+    """Generates an AI-powered 1-page interview prep cheat sheet customized for this specific job."""
+    prompt = f"""
+You are an expert technical interviewer and staff software engineer.
+Generate a high-yield, specific Technical Interview Prep Cheat Sheet for a candidate with 2 Years Experience interviewing for the role of '{job_title}' at '{company}'.
+
+Job Description:
+{job_description[:7000]}
+
+Respond ONLY in strict valid JSON:
+{{
+  "job_title": "{job_title}",
+  "company": "{company}",
+  "top_technical_questions": [
+    {{
+      "question": "Specific technical question expected from this JD",
+      "hint": "Crisp 1-2 sentence core concept/keywords to mention during the answer",
+      "category": "Core Java / Spring Boot / Concurrency / Databases / Kafka / System Design"
+    }}
+  ],
+  "architecture_talking_points": [
+    "Key architectural design pattern or scalability talking point relevant to this role"
+  ],
+  "smart_questions_to_ask_interviewer": [
+    "High-impact question to ask the engineering team at the end of the round"
+  ]
+}}
+"""
+    if settings.GROQ_API_KEY:
+        raw = await async_generate_with_groq(prompt, json_mode=True)
+        if raw:
+            try:
+                clean = raw.strip()
+                if clean.startswith("```json"): clean = clean[7:]
+                if clean.startswith("```"): clean = clean[3:]
+                if clean.endswith("```"): clean = clean[:-3]
+                parsed = json.loads(clean.strip())
+                if parsed.get("top_technical_questions"):
+                    return parsed
+            except Exception:
+                pass
+
+    # High-quality fallback cheat sheet
+    return {
+        "job_title": job_title,
+        "company": company,
+        "top_technical_questions": [
+            {
+                "question": "How does Spring Boot handle dependency injection and circular dependencies internally?",
+                "hint": "Uses ApplicationContext with 3-level singleton cache for Setter injection. Constructor circular dependency throws BeanCurrentlyInCreationException; resolve using @Lazy.",
+                "category": "Spring Boot"
+            },
+            {
+                "question": "Explain Java memory model (Heap vs Stack, Metaspace) and how Garbage Collection works in Java 17.",
+                "hint": "Objects stored in Heap (Eden, Survivor, Tenured), primitive/references in Stack. Java 17 defaults to G1GC with low-pause incremental collection.",
+                "category": "Core Java & JVM"
+            },
+            {
+                "question": "How do you optimize slow database queries and prevent N+1 query problem in Spring Data JPA?",
+                "hint": "Use JOIN FETCH or @EntityGraph to load relationships eagerly in 1 query instead of N select statements. Add B-Tree composite indexes on filter columns.",
+                "category": "Databases & ORM"
+            },
+            {
+                "question": "How do you achieve idempotency in distributed microservices REST APIs?",
+                "hint": "Client sends unique Idempotency-Key header. Server checks Redis/DB with unique constraint before processing; returns cached response if key already processed.",
+                "category": "System Design"
+            },
+            {
+                "question": "What is consumer lag in Apache Kafka and how do you monitor and resolve it?",
+                "hint": "Lag is difference between latest log offset and committed consumer offset. Resolve by increasing partition count, scaling consumer instances, or batch processing.",
+                "category": "Kafka & Messaging"
+            }
+        ],
+        "architecture_talking_points": [
+            "Resilience4j Circuit Breaker: Protecting upstream services by shedding load when downstream microservices experience timeouts or high error rates.",
+            "Cache-Aside with Redis: Combining TTL with random jitter to prevent cache stampedes and minimizing round trips to PostgreSQL.",
+            "Database connection pool tuning: Setting HikariCP pool size = (core_count * 2) + effective_spindle_count for optimal throughput."
+        ],
+        "smart_questions_to_ask_interviewer": [
+            f"How does the backend engineering team at {company} balance paying down technical debt vs shipping new features?",
+            "What does your CI/CD deployment cadence look like, and how are database schema migrations handled in production?"
+        ]
+    }
+

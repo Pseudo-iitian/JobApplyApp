@@ -1,0 +1,11 @@
+.env
+.git
+.gitignore
+**/venv
+**/node_modules
+**/dist
+**/*.db
+**/*.pyc
+**/__pycache__
+backend/uploads/*.pdf
+backend/static/screenshots/*.png

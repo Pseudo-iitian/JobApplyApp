@@ -34,6 +34,7 @@ export default function KanbanBoard({
   onStatusChange, 
   onDeleteJob, 
   onOpenTailor,
+  onOpenInterviewPrep,
   onOpenAutoApply,
   onRefreshJobs,
   isLoading
@@ -190,6 +191,7 @@ export default function KanbanBoard({
                 onStatusChange={onStatusChange}
                 onDelete={onDeleteJob}
                 onOpenTailor={onOpenTailor}
+                onOpenInterviewPrep={onOpenInterviewPrep}
               />
             ))
           )}

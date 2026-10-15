@@ -68,7 +68,7 @@ export default function TailorModal({ job, onClose }) {
           <div className="flex items-center space-x-2 shrink-0">
             {tailoredData && (
               <a
-                href={`http://localhost:8000/api/jobs/${job.id}/download-tailored-resume`}
+                href={api.getDownloadTailoredResumeUrl ? api.getDownloadTailoredResumeUrl(job.id) : `/api/jobs/${job.id}/download-tailored-resume`}
                 target="_blank"
                 rel="noreferrer"
                 download

@@ -1,5 +1,9 @@
-const API_BASE = "http://localhost:8000/api";
-export const WS_BASE = "ws://localhost:8000/api/notifications/ws";
+const API_HOST = (typeof window !== "undefined" && window.location)
+  ? `${window.location.protocol}//${window.location.hostname}:8000`
+  : "http://localhost:8000";
+
+export const API_BASE = `${API_HOST}/api`;
+export const WS_BASE = `${API_HOST.replace(/^http/, 'ws')}/api/notifications/ws`;
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 25000) {
   const controller = new AbortController();
@@ -15,6 +19,10 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 25000) {
 }
 
 export const api = {
+  getDownloadTailoredResumeUrl(jobId) {
+    return `${API_BASE}/jobs/${jobId}/download-tailored-resume`;
+  },
+
   // Jobs
   async getJobs(statusFilter = null) {
     const url = statusFilter ? `${API_BASE}/jobs?status_filter=${statusFilter}` : `${API_BASE}/jobs`;
@@ -51,9 +59,21 @@ export const api = {
     return res.json();
   },
 
+  async getJobAnalytics() {
+    const res = await fetchWithTimeout(`${API_BASE}/jobs/analytics`);
+    if (!res.ok) throw new Error("Failed to fetch job analytics");
+    return res.json();
+  },
+
   async tailorResume(jobId) {
     const res = await fetch(`${API_BASE}/jobs/${jobId}/tailor-resume`, { method: "POST" });
     if (!res.ok) throw new Error("Failed to generate tailored resume");
+    return res.json();
+  },
+
+  async getInterviewPrep(jobId) {
+    const res = await fetchWithTimeout(`${API_BASE}/jobs/${jobId}/interview-prep`, { method: "POST" }, 30000);
+    if (!res.ok) throw new Error("Failed to generate interview prep cheat sheet");
     return res.json();
   },
 

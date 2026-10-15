@@ -13,13 +13,15 @@ import {
   Sparkles,
   Menu,
   X,
-  ChevronRight
+  ChevronRight,
+  BarChart3
 } from 'lucide-react';
 
 export default function Navbar({ 
   onOpenResume, 
   onOpenSettings, 
   onOpenLogs,
+  onOpenAnalytics,
   onOpenAutoApply,
   onTriggerSearch, 
   isSearching,
@@ -106,6 +108,16 @@ export default function Navbar({
           >
             <Terminal className="w-3.5 h-3.5 text-emerald-400" />
             <span>Hunter Logs</span>
+          </button>
+
+          {/* Analytics Funnel Button */}
+          <button
+            onClick={onOpenAnalytics}
+            className="flex items-center space-x-1.5 px-2.5 py-2 bg-slate-800 hover:bg-slate-700/80 border border-slate-700 text-indigo-300 rounded-lg text-xs font-medium transition"
+            title="Pipeline Analytics & ATS Funnel"
+          >
+            <BarChart3 className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Analytics</span>
           </button>
 
           {/* Resume Upload / Active Status */}
@@ -272,6 +284,18 @@ export default function Navbar({
               <div className="min-w-0">
                 <div className="truncate">Resume (2y Exp)</div>
                 <div className="text-[10px] text-slate-400 font-normal truncate">{activeResume ? "Loaded" : "Upload"}</div>
+              </div>
+            </button>
+
+            {/* Pipeline Analytics */}
+            <button
+              onClick={() => handleMobileAction(onOpenAnalytics)}
+              className="col-span-2 flex items-center space-x-2 p-2.5 rounded-xl bg-slate-800/90 border border-slate-700 text-slate-100 text-xs font-semibold hover:border-indigo-500/50 transition text-left"
+            >
+              <BarChart3 className="w-4 h-4 text-indigo-400 shrink-0" />
+              <div className="min-w-0">
+                <div className="truncate">Job Hunter Analytics & Funnel</div>
+                <div className="text-[10px] text-slate-400 font-normal truncate">View match rates and platform stats</div>
               </div>
             </button>
 

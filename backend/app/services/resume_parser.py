@@ -3,6 +3,8 @@ import re
 from typing import Dict, Any, List
 from pypdf import PdfReader
 
+from datetime import datetime
+
 COMMON_JAVA_SKILLS = [
     "Java", "Core Java", "Java 8", "Java 11", "Java 17", "Spring", "Spring Boot",
     "Spring MVC", "Spring Security", "Hibernate", "JPA", "Microservices",
@@ -43,7 +45,9 @@ def estimate_experience_years(text: str) -> float:
     matches = re.findall(r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)(?:\s+of)?\s+experience", text, re.IGNORECASE)
     if matches:
         try:
-            return float(matches[0])
+            val = float(matches[0])
+            if 0.5 <= val <= 30:
+                return val
         except ValueError:
             pass
     
@@ -51,8 +55,27 @@ def estimate_experience_years(text: str) -> float:
     matches2 = re.findall(r"experience\s*[:\-]\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)", text, re.IGNORECASE)
     if matches2:
         try:
-            return float(matches2[0])
+            val = float(matches2[0])
+            if 0.5 <= val <= 30:
+                return val
         except ValueError:
             pass
 
-    return 2.0  # Default sensible estimate for our user
+    # Check year ranges like "2022 - Present", "2022 - 2024"
+    current_year = datetime.now().year
+    year_ranges = re.findall(r"(20\d\d)\s*(?:-|to)\s*(present|current|20\d\d)", text, re.IGNORECASE)
+    total_years = 0.0
+    for start_yr, end_yr in year_ranges:
+        try:
+            s = int(start_yr)
+            e = current_year if end_yr.lower() in ("present", "current") else int(end_yr)
+            diff = float(e - s)
+            if 0 < diff <= 20:
+                total_years = max(total_years, diff)
+        except Exception:
+            continue
+    if total_years > 0:
+        return total_years
+
+    return 2.0  # Default sensible estimate for candidate
+

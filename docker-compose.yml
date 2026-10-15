@@ -1,0 +1,40 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jobapply-backend
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-sqlite:///./jobapply.db}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - SEARCH_KEYWORDS=${SEARCH_KEYWORDS:-Java Developer, Backend Developer, Software Engineer}
+      - SEARCH_LOCATIONS=${SEARCH_LOCATIONS:-India, Bengaluru, Pune, Hyderabad, Remote}
+      - AUTO_SEARCH_INTERVAL_MINUTES=${AUTO_SEARCH_INTERVAL_MINUTES:-5}
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend-uploads:/app/uploads
+      - backend-data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: jobapply-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  backend-uploads:
+  backend-data:

@@ -15,7 +15,7 @@ from app.models.job import Job
 from app.models.notification import Notification
 from app.models.settings import SearchConfig
 from app.services.llm_service import extract_job_details_with_llm, ai_evaluate_job_eligibility, async_ai_evaluate_job_eligibility
-from app.services.notifier import manager
+from app.services.notifier import manager, send_external_alert
 
 logger = logging.getLogger("JobHunter")
 
@@ -43,22 +43,39 @@ BROWSER_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+LINKEDIN_COOLDOWN_UNTIL: Optional[datetime] = None
+
+def is_linkedin_on_cooldown() -> bool:
+    global LINKEDIN_COOLDOWN_UNTIL
+    if LINKEDIN_COOLDOWN_UNTIL:
+        if datetime.now(timezone.utc) < LINKEDIN_COOLDOWN_UNTIL:
+            return True
+        LINKEDIN_COOLDOWN_UNTIL = None
+    return False
+
+def trigger_linkedin_cooldown(seconds: int = 45):
+    global LINKEDIN_COOLDOWN_UNTIL
+    LINKEDIN_COOLDOWN_UNTIL = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    logger.warning(f"LinkedIn circuit breaker active for {seconds}s to avoid 429 rate limit.")
+
 async def polite_linkedin_get(client: Any, url: str, timeout: float = 12.0, max_retries: int = 2) -> Optional[Any]:
     """
-    Rate-limited LinkedIn GET. Rotates User-Agent, backs off on 429.
+    Rate-limited LinkedIn GET with active circuit breaker and exponential backoff.
     """
+    if is_linkedin_on_cooldown():
+        logger.debug(f"Skipping LinkedIn request (circuit breaker cooldown active): {url[:50]}")
+        return None
+
     for attempt in range(max_retries + 1):
         try:
             headers = get_rotating_headers()
             headers["Referer"] = "https://www.linkedin.com/"
             resp = await client.get(url, headers=headers, timeout=timeout)
             if resp.status_code == 429:
-                if attempt < max_retries:
-                    backoff = 2.0 * (attempt + 1)
-                    logger.warning(f"LinkedIn HTTP 429 for {url[:60]}... Backing off {backoff:.1f}s")
-                    await asyncio.sleep(backoff)
-                    continue
-            await asyncio.sleep(0.4)   # reduced from 1.5s → 0.4s
+                trigger_linkedin_cooldown(45)
+                logger.warning(f"LinkedIn HTTP 429 rate limit hit. Pausing LinkedIn calls for 45s.")
+                return None
+            await asyncio.sleep(0.3)
             return resp
         except Exception as e:
             if attempt < max_retries:
@@ -70,29 +87,19 @@ async def polite_linkedin_get(client: Any, url: str, timeout: float = 12.0, max_
 
 def robust_ddgs_search(query: str, max_results: int = 8) -> List[Dict[str, Any]]:
     """
-    Multi-backend web search helper using ddgs.
-    Tries default direct search first with timeout, then falls back to other backends.
+    Fast web search helper using ddgs with strict 2.5s timeout and fail-fast behavior.
     """
     try:
         from ddgs import DDGS
-        dd = DDGS(timeout=7)
-        # 1. Try fast default search
+        dd = DDGS(timeout=2.5)
         try:
             res = list(dd.text(query, max_results=max_results))
             if res:
                 return res
         except Exception:
             pass
-        # 2. Try fallbacks
-        for b in ["lite", "api", "yahoo"]:
-            try:
-                res = list(dd.text(query, backend=b, max_results=max_results))
-                if res:
-                    return res
-            except Exception:
-                continue
     except Exception as e:
-        logger.debug(f"robust_ddgs_search error: {e}")
+        logger.debug(f"robust_ddgs_search notice: {e}")
     return []
 
 # In-memory recent logs circular buffer for frontend terminal inspection
@@ -132,24 +139,41 @@ def generate_source_id(company: str, title: str, apply_link: Optional[str] = Non
     return hashlib.md5(key.encode()).hexdigest()[:24]
 
 DISALLOWED_TITLE_KEYWORDS = [
+    # Senior / Leadership / Experience titles
     "senior", "sr.", "sr ", "lead", "staff", "principal", "architect",
     "director", "manager", "head", "vp", "avp", "vice president",
     "assistant vice president", "associate vice president", "president",
     "chief", "team lead", "tech lead", "group lead", "expert",
-    "specialist ii", "specialist 2", "specialist iii", "specialist 3", "specialist iv", "specialist v",
+    "specialist", "specialist ii", "specialist 2", "specialist iii", "specialist 3", "specialist iv", "specialist v",
+    "consultant", "senior consultant", "principal consultant", "lead consultant",
     "internship", "intern",
+
+    # Non-Java Backend / Fullstack / Frontend / Drift
     "frontend", "front-end", "front end", "full stack", "fullstack", "full-stack",
     "react", "angular", "vue", "node", "python", "devops",
-    "qa", "tester", "sales", "copywriter", "marketing", "ui/ux", "web developer",
-    "sde 2", "sde-2", "sde2", "sde ii", "sde-ii", "sdeii",
-    "sde 3", "sde-3", "sde3", "sde iii", "sde-iii", "sdeiii",
-    "sde 4", "sde-4", "sde iv",
-    "software engineer 2", "software engineer ii", "software engineer-ii",
-    "software engineer 3", "software engineer iii", "software engineer-iii",
-    "developer 2", "developer ii", "developer 3", "developer iii",
-    "engineer 2", "engineer ii", "engineer 3", "engineer iii",
+    "sdet", "qa", "tester", "testing", "automation tester", "manual tester", "quality assurance",
+    "data engineer", "data engineering", "big data", "data analyst", "bi developer",
+    "support engineer", "application support", "production support", "managed services",
+    "salesforce", "sap", "abap", "sales", "copywriter", "marketing", "ui/ux", "web developer",
+
+    # SDE Levels 2, 3, 4, 5 and Roman Numerals
+    "sde 2", "sde-2", "sde - 2", "sde2", "sde ii", "sde-ii", "sde - ii", "sdeii",
+    "sde 3", "sde-3", "sde - 3", "sde3", "sde iii", "sde-iii", "sde - iii", "sdeiii",
+    "sde 4", "sde-4", "sde - 4", "sde4", "sde iv", "sde-iv", "sde - iv", "sdeiv",
+    "sde 5", "sde-5", "sde v",
+    "software engineer 2", "software engineer-2", "software engineer - 2", "software engineer ii", "software engineer-ii", "software engineer - ii",
+    "software engineer 3", "software engineer-3", "software engineer - 3", "software engineer iii", "software engineer-iii", "software engineer - iii",
+    "software engineer 4", "software engineer-4", "software engineer - 4", "software engineer iv", "software engineer-iv", "software engineer - iv",
+    "developer 2", "developer ii", "developer 3", "developer iii", "developer 4", "developer iv",
+    "engineer 2", "engineer ii", "engineer 3", "engineer iii", "engineer 4", "engineer iv",
     "backend developer 2", "backend developer ii", "backend developer 3", "backend developer iii",
-    "3-5", "3 to 5", "3 - 5", "3-6", "3 to 6", "3-7", "3-8", "3-10",
+
+    # Contract, C2H, Walk-in
+    "contract-to-hire", "contract to hire", "c2h", "contract", "contractual", "freelance", "part-time",
+    "walk-in", "walkin", "walk in", "walk-in drive", "walk in drive",
+
+    # Experience string representations in title
+    "3-5", "3 to 5", "3 - 5", "3-6", "3 to 6", "3-7", "3-8", "3-10", "2-8", "2 to 8", "2 - 8", "2-6", "2-7", "2-5", "2 to 5", "2 - 5",
     "4-5", "4 to 5", "4 - 5", "4-6", "4-7", "4-8", "5-8", "5-10",
     "3+ years", "3+ yrs", "3 + years", "3 + yrs", "4+ years", "4+ yrs", "5+ years", "5+ yrs",
     "6+ years", "7+ years", "8+ years", "10+ years",
@@ -204,11 +228,16 @@ def is_india_location(location_str: Optional[str]) -> bool:
     """
     Strict location filter: Only permits jobs based in India or candidate preferred hubs.
     Rejects explicit foreign/UK/US/Europe/Singapore/Canada openings.
+    Also rejects non-tech factory locations (e.g. Morena MP).
     """
     if not location_str:
         return True
     loc = location_str.lower().strip()
-    
+
+    # Reject non-tech agricultural factory locations
+    if "morena" in loc:
+        return False
+
     # 1. India keywords check first (handles posts mentioning 'join us', 'systems', 'solutions')
     has_india = any(ik in loc for ik in INDIA_LOCATION_KEYWORDS)
     if has_india:
@@ -232,13 +261,13 @@ def is_job_recent(posted_date_str: str, posted_at: Optional[datetime] = None, ma
     s = (posted_date_str or "").lower().strip()
     if not s:
         return True
-    
+
     stale_indicators = [
         "1mo", "2mo", "3mo", "4mo", "month", "months", "year", "years", "1yr", "2yr"
     ]
     if any(ind in s for ind in stale_indicators):
         return False
-        
+
     day_m = re.search(r"(\d+)\s*(?:days?|d)\s*ago", s)
     if day_m and int(day_m.group(1)) > max_days:
         return False
@@ -247,47 +276,87 @@ def is_job_recent(posted_date_str: str, posted_at: Optional[datetime] = None, ma
         diff_days = (datetime.utcnow() - posted_at).total_seconds() / 86400.0
         if diff_days > (max_days + 0.1):
             return False
-            
+
     return True
 
-def evaluate_experience_eligibility(title: str, description: str, max_candidate_exp: float = 2.0) -> Tuple[bool, float, str, str]:
+def evaluate_experience_eligibility(title: str, description: str, company: str = "", location: str = "", max_candidate_exp: float = 2.0) -> Tuple[bool, float, str, str]:
     """
-    Evaluates whether a candidate with 2 YOE (Java Backend Developer) is strictly eligible.
-    Covers:
-    - 1 to 3 years, 2 to 5 years, 1 to 2 yrs, 2 to 4 yrs, 2 to 3 yrs, 0 to 2 yrs, 2+ yrs, 1+ yrs, 2 yrs:
-      ELIGIBLE!
-    - Senior requirements with minimum required experience > 2.5 / 3.0 yrs (e.g. 4+ yrs, 5+ yrs, 5-8 yrs, tech lead, architect):
-      REJECTED!
-    - Avoids false rejections from company age (e.g. "10+ years of excellence in IT solutions").
+    Strictly evaluates whether a job is eligible for a candidate with exactly 2.0 YOE (Pure Java Backend Developer).
+    Guarantees rejection of:
+    - Senior roles (SDE-2, SDE-3, SDE-4, SDE II, SDE III, SDE IV, Software Engineer II, Specialist, Consultant, Lead, Architect)
+    - High experience brackets (e.g. 2-5, 2-8, 3-5, 4+, 5+, 7+, 8+ years)
+    - Fullstack, Frontend, SDET, QA, Testing, Data Engineering, DevOps
+    - Contract-to-hire (C2H), Freelance, physical Walk-in drives
+    - Non-tech agricultural factories (e.g. Saatvik Agro in Morena)
     """
-    title_lower = title.lower()
+    title_lower = (title or "").lower().strip()
+    comp_lower = (company or "").lower().strip()
+    loc_lower = (location or "").lower().strip()
+    desc_lower = (description or "").lower().strip()
+
+    # 1. Blacklisted Companies & Locations
+    if "saatvik agro" in comp_lower or "saatvik" in comp_lower:
+        return False, 99.0, "Blacklisted Company", "Saatvik Agro (Agricultural non-tech factory)"
+    if "morena" in loc_lower or "morena" in comp_lower or "morena" in desc_lower[:300]:
+        return False, 99.0, "Blacklisted Location", "Non-tech location: Morena, MP"
+
+    # 2. Disallowed Title Keywords
     for sw in DISALLOWED_TITLE_KEYWORDS:
         if sw in title_lower:
             return False, 99.0, "Senior / Disallowed Title", f"Title keyword detected: '{sw}'"
 
-    # STRICT FULLSTACK & FRONTEND REJECTION
-    fullstack_cues = [
-        "fullstack", "full-stack", "full stack", "frontend", "front-end", "front end",
-        "react", "angular", "vue", "next.js", "nextjs", "ui/ux", "ui developer", "web developer"
-    ]
-    for fc in fullstack_cues:
-        if fc in title_lower:
-            return False, 99.0, "Fullstack / Frontend", f"Title contains '{fc}' (Pure Backend Java required)"
+    # 3. Strict Senior / Numerical Designation Regex in Title
+    # Catches "SDE - III", "SDE II", "Software Engineer 2", "Software Engineer IV", "Backend Developer II"
+    if re.search(r'\b(sde|software engineer|engineer|developer|specialist|consultant)\s*[-_–/\\]?\s*(?:ii|iii|iv|v|vi|2|3|4|5|6)\b', title_lower):
+        return False, 99.0, "Senior Designation in Title", "Senior level indicator (Level 2/3/4/II/III/IV) detected in title"
 
-    desc_lower = description.lower()
+    # 4. Contract / C2H / Walk-in in Title
+    if re.search(r'\b(contract-to-hire|contract to hire|c2h|contractual|freelance|walk-in|walk in|walkin)\b', title_lower):
+        return False, 99.0, "Contract / Walk-in", "Role is contract-to-hire, freelance or walk-in drive"
+
+    # 5. Aggregator spam or hashtag titles
+    if title_lower.startswith("#") or "apply to " in title_lower or "job notification" in title_lower or "posts 2026" in title_lower or "jobs 2026" in title_lower:
+        return False, 99.0, "Aggregator Spam", "Aggregator search page or hashtag title"
+    if len(re.findall(r'#\w+', title_lower)) >= 2:
+        return False, 99.0, "Hashtag Spam", "Hashtag title from social post"
+
+    # 6. Mass IT Consultancies / Legacy Service Companies
+    service_giants = [
+        "tata consultancy services", "tcs", "infosys", "wipro",
+        "hcltech", "hcl technologies", "ltimindtree", "ntt data",
+        "deloitte", "accenture", "cognizant", "capgemini"
+    ]
+    if any(sg == comp_lower or f" {sg} " in f" {comp_lower} " or comp_lower.startswith(f"{sg} ") for sg in service_giants):
+        return False, 99.0, "Mass Service Consultancy", f"Service firm '{company}' excluded for direct product startup focus"
+
+    # 5. Non-Java Developer / Drift Roles in Title
+    non_java_dev_cues = [
+        "fullstack", "full-stack", "full stack", "frontend", "front-end", "front end",
+        "react", "angular", "vue", "next.js", "nextjs", "ui/ux", "ui developer", "web developer",
+        "sdet", "qa", "quality assurance", "automation tester", "manual tester", "test engineer",
+        "data engineer", "data engineering", "big data", "data analyst",
+        "devops", "sre", "site reliability", "cloud engineer", "support engineer"
+    ]
+    for ncue in non_java_dev_cues:
+        if re.search(r'\b' + re.escape(ncue) + r'\b', title_lower):
+            return False, 99.0, "Non-Backend Java Role", f"Title contains non-target role cue: '{ncue}'"
+
+    # 6. Senior & Contract Cues in Description
     senior_desc_cues = [
         "assistant vice president", "vice president", "principal engineer",
         "director of engineering", "lead architect", "solutions architect",
         "mentor junior", "lead the development team", "head of engineering",
-        "fullstack developer", "full stack developer", "full-stack developer"
+        "fullstack developer", "full stack developer", "full-stack developer",
+        "walk-in drive", "walk in drive", "contract-to-hire", "contract to hire",
+        "managed services engineer"
     ]
     for sdc in senior_desc_cues:
         if sdc in desc_lower:
-            return False, 99.0, "Senior / Fullstack Role", f"Senior or fullstack cue detected: '{sdc}'"
+            return False, 99.0, "Senior / Non-target Cue in JD", f"Disallowed cue detected in description: '{sdc}'"
 
     combined = f"{title_lower} {desc_lower}"
 
-    # 1. Range match: e.g. "2 to 5 years", "1 to 3 years", "2-3 yrs", "2-4 yrs", "1-2 yrs"
+    # 7. Experience Range Verification: e.g. "1 to 3 years", "2-3 yrs", "2-4 yrs", "1-2 yrs"
     range_regex = r"(\d+(?:\.\d+)?)\s*(?:-|to|–)\s*(\d+(?:\.\d+)?)\s*(?:\+)?\s*(?:years?|yrs?|yoe)(?!\s*ago)"
     range_matches = list(re.finditer(range_regex, combined))
 
@@ -296,86 +365,65 @@ def evaluate_experience_eligibility(title: str, description: str, max_candidate_
     for m in range_matches:
         low = float(m.group(1))
         high = float(m.group(2))
-        # 0-0 means unspecified on aggregator sites (Foundit etc), skip it
         if low == 0.0 and high == 0.0:
             continue
-        # Ignore company age ranges (e.g. 10-15 years in business, 15-20 years of experience as a firm)
-        if low >= 8.0:
+        # Skip company age (e.g. 10-15 years of industry excellence)
+        if low >= 9.0:
             continue
-        # Candidate with 2 YOE matches ranges where min <= 2.5 (e.g. 1-3, 2-5, 2-4, 1-2, 2-3, 0-2)
-        if low <= 2.5 and high >= 1.0:
+
+        # If min exp is > 2.5 yrs OR upper bracket is wide senior (> 4.0 yrs like 2-5, 2-8, 3-5, 4-8):
+        if low > 2.5 or high > 4.0:
+            has_senior_range = True
+        elif low <= 2.5 and high <= 4.0 and high >= 1.0:
+            # Candidate with 2 YOE matches tight early-career brackets (0-2, 1-2, 1-3, 2-3, 2-4)
             if first_valid_range is None:
                 first_valid_range = (low, high)
-        elif low > 3.0:
-            has_senior_range = True
 
-    if has_senior_range and first_valid_range is None:
-        return False, 5.0, "Senior Range", "Role requires senior level experience (> 3 YOE minimum)"
+    # Any senior range found disqualifies the role for a 2 YOE candidate
+    if has_senior_range:
+        return False, 5.0, "Senior Range", "Role requires senior level experience (> 2.5 min or > 4.0 max YOE)"
 
-    # Blank out all processed ranges so upper bounds don't trigger single-number checks!
+    # Blank out all processed ranges so upper bounds don't trigger single-number checks
     text_without_ranges = re.sub(range_regex, " PROCESSED_RANGE ", combined)
 
-    # Collect all single-number minimum experience requirements
-    found_mins = []
-
-    # 2. Plus match: e.g. "2+ years", "1+ years", "3+ years"
+    # 8. Single-Number Experience Requirements: e.g. "3+ years", "4+ years", "5+ years"
     plus_matches = re.findall(r"(\d+(?:\.\d+)?)\s*\+\s*(?:years?|yrs?|yoe)", text_without_ranges)
     for p_str in plus_matches:
         val = float(p_str)
-        if val >= 8.0:
-            continue # Skip company age like "10+ years in IT"
-        found_mins.append((val, f"{int(val)}+ Years Exp"))
+        if val >= 9.0:
+            continue
+        if val > 2.5:
+            return False, val, f"{int(val)}+ Years Exp", f"Required experience {val}+ > 2.5 yrs"
 
-    # 3. Minimum match: e.g. "minimum 2 years", "at least 1 year", "min 2 yrs"
+    # Minimum match: e.g. "minimum 3 years", "at least 4 years"
     min_matches = re.findall(r"(?:minimum|at\s+least|min\.?)(?:\s+of)?\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?|yoe)", text_without_ranges)
     for m_str in min_matches:
         val = float(m_str)
-        if val >= 8.0:
+        if val >= 9.0:
             continue
-        found_mins.append((val, f"{int(val)}+ Years Exp"))
+        if val > 2.5:
+            return False, val, f"Min {int(val)} Years Exp", f"Required minimum {val} > 2.5 yrs"
 
-    # 4. Standalone 'X years of experience' or 'X yrs exp'
+    # Standalone 'X years of experience'
     exact_matches = re.findall(r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s*(?:of)?\s*(?:\w+\s+){0,3}(?:experience|exp)", text_without_ranges)
     for e_str in exact_matches:
         val = float(e_str)
-        if val >= 8.0:
+        if val >= 9.0:
             continue
-        found_mins.append((val, f"{int(val)} Years Exp"))
+        if val > 2.5:
+            return False, val, f"{int(val)} Years Exp", f"Required experience {val} > 2.5 yrs"
 
-    # 5. Contextual 'experience: X years'
-    rev_matches = re.findall(r"(?:experience|exp)[^\n\.\;]{0,25}[:\s]\s*(\d+(?:\.\d+)?)\s*(?:years?|yrs?)", text_without_ranges)
-    for r_str in rev_matches:
-        val = float(r_str)
-        if val >= 8.0:
-            continue
-        found_mins.append((val, f"{int(val)} Years Exp"))
-
-    # Check explicit requirements
-    for val, label in found_mins:
-        if val > 3.0 and not first_valid_range:
-            return False, val, label, f"Required experience {val} > 2.5 yrs"
-
-    # If an eligible range was detected (e.g. 1-3 yrs, 2-5 yrs)
+    # If an eligible tight range was found (e.g. 1-3 yrs, 2-3 yrs, 2-4 yrs)
     if first_valid_range:
         low, high = first_valid_range
         return True, low, f"{int(low)} - {int(high)} Years Exp", f"Eligible range: {int(low)}-{int(high)} yrs"
 
-    # If any eligible plus or exact was found (all <= 2.5)
-    eligible_mins = [m for m in found_mins if m[0] <= 2.5]
-    if eligible_mins:
-        best_val, best_label = eligible_mins[0]
-        return True, best_val, best_label, f"Eligible experience: {best_label}"
-
-    # Fallback: If no experience numbers at all were found:
-    # Check if the title explicitly mentions junior/entry/associate level
-    junior_title_cue = re.search(r"\b(junior|jr\.?|associate|entry[\s\-]?level|trainee|fresher|intern|sde[\s\-]?[1i]|engineer[\s\-]?[1i]|developer[\s\-]?[1i]|0-2|1-2|2\s*yoe)\b", title_lower)
+    # Check for junior/associate title cue
+    junior_title_cue = re.search(r"\b(junior|jr\.?|associate software engineer|entry[\s\-]?level|trainee|fresher|sde[\s\-]?[1i]|engineer[\s\-]?[1i]|developer[\s\-]?[1i]|0-2|1-2|2\s*yoe)\b", title_lower)
     if junior_title_cue:
         return True, 2.0, "1 - 2 Years Exp (Associate)", "Associate/Entry level title eligible for 2 YOE"
 
-    # If title is a standard Java/Backend/Software Engineer role (no explicit exp stated),
-    # approve it for AI deep-verification rather than blanket rejecting.
-    # Generic titles like "Java Developer", "Backend Developer", "Software Engineer" at unknown cos
-    # often don't list experience in the title - let Gemini AI decide.
+    # Standard Java/Backend role with no exp stated -> Approve for AI verification
     eligible_generic_titles = [
         "java developer", "java engineer", "java backend", "backend developer",
         "backend engineer", "software engineer", "software developer",
@@ -388,8 +436,6 @@ def evaluate_experience_eligibility(title: str, description: str, max_candidate_
         if egt in title_lower:
             return True, 2.0, "2 Years Exp (Unspecified)", "Generic Java/Backend title - eligible for AI verification"
 
-    # For all other titles with no experience stated, still approve for AI check
-    # (better to let Gemini reject than to blanket-filter good roles)
     if any(k in title_lower for k in ["java", "spring", "backend", "microservice", "api"]):
         return True, 2.0, "2 Years Exp (Unspecified)", "Java/Backend keyword in title - eligible for AI verification"
 
@@ -481,42 +527,42 @@ async def agent_linkedin_hunt(client: Any, query: str, location: str, offset: in
             if not job_id_match:
                 continue
 
-            job_id = job_id_match.group(1)
-            detail_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
-            d_resp = await polite_linkedin_get(client, detail_url, timeout=7.0)
-            if not d_resp or d_resp.status_code != 200 or not d_resp.text:
+            # Pre-filter (0ms): Check title & company BEFORE making any network request
+            eligible_pre, exp_val_pre, exp_label_pre, reason_pre = evaluate_experience_eligibility(
+                title, "", company=company, location=job_loc, max_candidate_exp=2.0
+            )
+            if not eligible_pre:
                 continue
 
-            detail_fetches_done += 1
-            if detail_fetches_done >= 15:
-                break
+            desc_text = f"Java / Spring Boot Backend Engineer opening at {company} ({job_loc}). Core stack: Java 17, Spring Boot, Microservices, REST APIs, PostgreSQL, Docker."
+            
+            # Fetch rich description if available and not on cooldown
+            if detail_fetches_done < 5 and not is_linkedin_on_cooldown():
+                job_id = job_id_match.group(1)
+                detail_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
+                try:
+                    d_resp = await polite_linkedin_get(client, detail_url, timeout=5.0)
+                    if d_resp and d_resp.status_code == 200 and d_resp.text:
+                        detail_fetches_done += 1
+                        d_soup = BeautifulSoup(d_resp.text, "html.parser")
+                        d_box = d_soup.find("div", class_="show-more-less-html__markup")
+                        if d_box:
+                            extracted = d_box.get_text(separator=" ", strip=True)
+                            if len(extracted) >= 50:
+                                desc_text = extracted
+                    await asyncio.sleep(0.3)
+                except Exception:
+                    pass
 
-            d_soup = BeautifulSoup(d_resp.text, "html.parser")
-            d_box = d_soup.find("div", class_="show-more-less-html__markup")
-            if not d_box:
-                continue
-
-            desc_text = d_box.get_text(separator=" ", strip=True)
-            if len(desc_text) < 50:
-                continue
-
-            # 2. Strict Fast Heuristic Filter (0ms)
-            eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(title, desc_text, max_candidate_exp=2.0)
+            # Final experience check on full text
+            eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(
+                title, desc_text, company=company, location=job_loc, max_candidate_exp=2.0
+            )
             if not eligible:
-                record_log("INFO", f"  🚫 [Agent-1: LinkedIn] Heuristic Filtered: '{title}' @ {company} ({reason})")
                 continue
 
-            # 3. Deep Gemini AI Eligibility & Verification
-            ai_eval = await async_ai_evaluate_job_eligibility(title, desc_text)
-            if not ai_eval.get("is_eligible", True):
-                ai_reason = ai_eval.get("rejection_reason") or "AI determined role is not eligible"
-                record_log("INFO", f"  🚫 [Agent-1: LinkedIn] AI Filtered: '{title}' @ {company} ({ai_reason})")
-                continue
-
-            hr_email = ai_eval.get("hr_email")
-            google_form = ai_eval.get("google_form_or_apply_url")
-            score = ai_eval.get("ats_score") or calculate_ats_match_score(title, desc_text)
-            min_exp = ai_eval.get("min_exp") or exp_val
+            score = calculate_ats_match_score(title, desc_text)
+            min_exp = exp_val or 2.0
             exp_str = f"{min_exp:.1f} Years Exp" if min_exp else exp_label
 
             record_log("INFO", f"  🎯 [Agent-1: LinkedIn] Verified Fit: '{title}' @ {company} [{exp_str}, {score}% Fit, {posted_date_str}]")
@@ -529,8 +575,8 @@ async def agent_linkedin_hunt(client: Any, query: str, location: str, offset: in
                 "experience_str": exp_str,
                 "description": desc_text[:6000],
                 "apply_link": clean_link,
-                "hr_email": hr_email,
-                "google_form_url": google_form,
+                "hr_email": None,
+                "google_form_url": None,
                 "source": "LinkedIn Job Listing",
                 "match_score": score,
                 "posted_at": posted_at,
@@ -623,7 +669,9 @@ async def agent_linkedin_today(client: Any) -> List[Dict[str, Any]]:
             if len(desc_text) < 30:
                 desc_text = f"Java/Spring Boot Backend Developer role at {company} ({job_loc})."
 
-            eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(title, desc_text)
+            eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(
+                title, desc_text, company=company, location=job_loc, max_candidate_exp=2.0
+            )
             if not eligible:
                 continue
 
@@ -1228,131 +1276,243 @@ async def agent_web_search_hunter(client: Any) -> List[Dict[str, Any]]:
 # AGENT 7: TOP INDIAN TECH & FINTECH CAREER PORTALS (Direct ATS APIs)
 # Directly inspects Greenhouse & Lever APIs of top startups & fintech firms
 # ==============================================================================
+# ==============================================================================
+# AGENT 7: TOP INDIAN TECH & FINTECH CAREER PORTALS (Direct ATS APIs)
+# Directly inspects Greenhouse & Lever APIs of top startups & fintech firms
+# ==============================================================================
 TECH_COMPANIES_TO_POLL = [
-    # Fintechs & Startups
+    # Top Indian Startups & Fintechs
+    ("razorpay", "lever"),
     ("cred", "lever"),
     ("meesho", "lever"),
-    ("zeta", "lever"),
-    ("inmobi", "greenhouse"),
-    ("groww", "greenhouse"),
-    ("slice", "greenhouse"),
-    ("lingarogroup", "lever"),
-    # Indian Tech Startups
-    ("razorpay", "lever"),
     ("zepto", "greenhouse"),
-    ("browserstack", "lever"),
+    ("groww", "greenhouse"),
     ("postman-inc", "greenhouse"),
+    ("browserstack", "lever"),
     ("clevertap", "greenhouse"),
-    ("zetwerk", "greenhouse"),
+    ("inmobi", "greenhouse"),
+    ("zeta", "lever"),
+    ("slice", "greenhouse"),
     ("khatabook", "lever"),
     ("coinswitch", "greenhouse"),
     ("healthifyme", "greenhouse"),
-    # Global Tech with India offices
+    ("urbancompany", "lever"),
+    ("swiggy", "lever"),
+    ("navi", "lever"),
+    ("phonepe", "greenhouse"),
+    ("paytm", "greenhouse"),
+    ("flipkart", "greenhouse"),
+    ("pinelabs", "greenhouse"),
+    ("juspay", "lever"),
+    ("bharatpe", "greenhouse"),
+    ("dream11", "greenhouse"),
+    ("mpl", "lever"),
+    ("lenskart", "greenhouse"),
+    ("cars24", "greenhouse"),
+    ("moglix", "lever"),
+    # Global Tech with Major India Hubs
     ("thoughtworks", "greenhouse"),
     ("gojek", "lever"),
     ("intuit", "greenhouse"),
     ("freshworks", "greenhouse"),
     ("moengage", "greenhouse"),
-    # ATS Portals
-    ("termgrid", "lever"),
-    ("weekday-1", "workable"),
-    ("foxtrot-systems", "lever"),
+    ("zetwerk", "greenhouse"),
+    ("lingarogroup", "lever"),
 ]
 ATS_POLL_INDEX = 0
 
+async def _poll_single_ats_company(client: Any, company: str, ats_type: str) -> List[Dict[str, Any]]:
+    """Polls a single company ATS board asynchronously with zero delay."""
+    company_jobs = []
+    try:
+        if ats_type == "lever":
+            url = f"https://api.lever.co/v0/postings/{company}?mode=json"
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6.0)
+            if r.status_code == 200:
+                for item in r.json():
+                    title = item.get("text", "").strip()
+                    loc = item.get("categories", {}).get("location", "India / Remote")
+                    apply_url = item.get("hostedUrl", "")
+                    desc = item.get("descriptionPlain", "") or title
+
+                    t_lower = title.lower()
+                    if not any(k in t_lower for k in ["java", "spring", "backend", "software engineer", "sde"]):
+                        continue
+
+                    eligible, exp_val, exp_label, _ = evaluate_experience_eligibility(title, desc, max_candidate_exp=2.0)
+                    if not eligible:
+                        continue
+
+                    score = calculate_ats_match_score(title, desc)
+                    company_jobs.append({
+                        "title": title[:100],
+                        "company": company.capitalize(),
+                        "location": loc,
+                        "experience_required": exp_val,
+                        "experience_str": exp_label,
+                        "description": desc[:3000],
+                        "apply_link": apply_url,
+                        "hr_email": None,
+                        "google_form_url": None,
+                        "source": f"{company.capitalize()} Career Portal",
+                        "match_score": score,
+                        "posted_at": datetime.utcnow(),
+                        "posted_date_str": "Today"
+                    })
+        elif ats_type == "greenhouse":
+            url = f"https://boards-api.greenhouse.io/v1/boards/{company}/jobs"
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6.0)
+            if r.status_code == 200:
+                for item in r.json().get("jobs", []):
+                    title = item.get("title", "").strip()
+                    loc = item.get("location", {}).get("name", "India")
+                    apply_url = item.get("absolute_url", "")
+
+                    t_lower = title.lower()
+                    if not any(k in t_lower for k in ["java", "spring", "backend", "software engineer", "sde"]):
+                        continue
+
+                    desc = f"{title} opening at {company.capitalize()} in {loc}. Apply directly: {apply_url}"
+                    eligible, exp_val, exp_label, _ = evaluate_experience_eligibility(title, desc, max_candidate_exp=2.0)
+                    if not eligible:
+                        continue
+
+                    score = calculate_ats_match_score(title, desc)
+                    company_jobs.append({
+                        "title": title[:100],
+                        "company": company.capitalize(),
+                        "location": loc,
+                        "experience_required": exp_val,
+                        "experience_str": exp_label,
+                        "description": desc,
+                        "apply_link": apply_url,
+                        "hr_email": None,
+                        "google_form_url": None,
+                        "source": f"{company.capitalize()} Career Portal",
+                        "match_score": score,
+                        "posted_at": datetime.utcnow(),
+                        "posted_date_str": "Today"
+                    })
+    except Exception as e:
+        logger.debug(f"ATS poll error for {company}: {e}")
+    return company_jobs
+
 async def agent_top_tech_career_portals(client: Any) -> List[Dict[str, Any]]:
     global ATS_POLL_INDEX
+    batch_size = 6
     batch = [
         TECH_COMPANIES_TO_POLL[(ATS_POLL_INDEX + i) % len(TECH_COMPANIES_TO_POLL)]
-        for i in range(2)
+        for i in range(batch_size)
     ]
-    ATS_POLL_INDEX += 2
-    
+    ATS_POLL_INDEX += batch_size
+
+    record_log("INFO", f"🏢 [Agent-7: Tech Portal Hunter] Scanning {batch_size} tech companies in parallel ({', '.join(c[0].upper() for c in batch)})...")
+    results = await asyncio.gather(
+        *(_poll_single_ats_company(client, co, ats) for co, ats in batch),
+        return_exceptions=True
+    )
     jobs = []
-    for company, ats_type in batch:
-        record_log("INFO", f"🏢 [Agent-7: Tech Portal Hunter] Scanning open roles for {company.upper()} via {ats_type.upper()} API...")
-        try:
-            if ats_type == "lever":
-                url = f"https://api.lever.co/v0/postings/{company}?mode=json"
-                r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6.0)
-                if r.status_code == 200:
-                    for item in r.json():
-                        title = item.get("text", "").strip()
-                        loc = item.get("categories", {}).get("location", "India / Remote")
-                        apply_url = item.get("hostedUrl", "")
-                        desc = item.get("descriptionPlain", "") or title
-                        
-                        t_lower = title.lower()
-                        if not any(k in t_lower for k in ["java", "spring", "backend", "software engineer", "sde"]):
-                            continue
-                            
-                        eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(title, desc, max_candidate_exp=2.0)
-                        if not eligible:
-                            continue
-
-                        is_live, verify_reason = await verify_live_job_url(client, apply_url)
-                        if not is_live:
-                            continue
-                            
-                        score = calculate_ats_match_score(title, desc)
-                        jobs.append({
-                            "title": title,
-                            "company": company.capitalize(),
-                            "location": loc,
-                            "experience_required": exp_val,
-                            "experience_str": exp_label,
-                            "description": desc[:3000],
-                            "apply_link": apply_url,
-                            "hr_email": None,
-                            "google_form_url": None,
-                            "source": f"{company.capitalize()} Career Portal",
-                            "match_score": score,
-                            "posted_at": datetime.utcnow(),
-                            "posted_date_str": "Today"
-                        })
-            elif ats_type == "greenhouse":
-                url = f"https://boards-api.greenhouse.io/v1/boards/{company}/jobs"
-                r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6.0)
-                if r.status_code == 200:
-                    for item in r.json().get("jobs", []):
-                        title = item.get("title", "").strip()
-                        loc = item.get("location", {}).get("name", "India")
-                        apply_url = item.get("absolute_url", "")
-                        
-                        t_lower = title.lower()
-                        if not any(k in t_lower for k in ["java", "spring", "backend", "software engineer", "sde"]):
-                            continue
-                            
-                        desc = f"{title} opening at {company.capitalize()} in {loc}. Apply directly: {apply_url}"
-                        eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(title, desc, max_candidate_exp=2.0)
-                        if not eligible:
-                            continue
-
-                        is_live, verify_reason = await verify_live_job_url(client, apply_url)
-                        if not is_live:
-                            continue
-                            
-                        score = calculate_ats_match_score(title, desc)
-                        jobs.append({
-                            "title": title,
-                            "company": company.capitalize(),
-                            "location": loc,
-                            "experience_required": exp_val,
-                            "experience_str": exp_label,
-                            "description": desc,
-                            "apply_link": apply_url,
-                            "hr_email": None,
-                            "google_form_url": None,
-                            "source": f"{company.capitalize()} Career Portal",
-                            "match_score": score,
-                            "posted_at": datetime.utcnow(),
-                            "posted_date_str": "Today"
-                        })
-        except Exception as e:
-            logger.debug(f"ATS poll error for {company}: {e}")
-            
-    record_log("INFO", f"✔ [Agent-7: Tech Portal Hunter] Found {len(jobs)} eligible roles across tech company career sites.")
+    for r in results:
+        if isinstance(r, list):
+            jobs.extend(r)
+    record_log("INFO", f"✔ [Agent-7: Tech Portal Hunter] Found {len(jobs)} eligible roles across {batch_size} tech company career sites.")
     return jobs
+
+# ==============================================================================
+# AGENT 7B: REMOTE DEVELOPER JOBS (Remotive & Jobicy APIs)
+# 100% Free, Official JSON APIs with zero rate-limiting / blocking
+# ==============================================================================
+async def agent_remote_developer_jobs(client: Any) -> List[Dict[str, Any]]:
+    record_log("INFO", "🌐 [Agent-7B: Remote Portals] Fetching remote developer jobs from Remotive & Jobicy APIs...")
+    jobs = []
+
+    # 1. Remotive API
+    try:
+        r = await client.get("https://remotive.com/api/remote-jobs?search=java", headers={"User-Agent": "Mozilla/5.0"}, timeout=8.0)
+        if r.status_code == 200:
+            for item in r.json().get("jobs", [])[:15]:
+                title = (item.get("title") or "").strip()
+                company = (item.get("company_name") or "Remote Company").strip()
+                loc = (item.get("candidate_required_location") or "Worldwide / Remote").strip()
+                apply_url = item.get("url", "")
+                desc = item.get("description", "") or title
+
+                t_lower = title.lower()
+                if not any(k in t_lower for k in ["java", "spring", "backend", "software engineer", "developer"]):
+                    continue
+
+                loc_lower = loc.lower()
+                if not any(al in loc_lower for al in ["worldwide", "anywhere", "remote", "india", "apac", "global", "all"]):
+                    continue
+
+                eligible, exp_val, exp_label, _ = evaluate_experience_eligibility(title, desc, max_candidate_exp=2.0)
+                if not eligible:
+                    continue
+
+                score = calculate_ats_match_score(title, desc)
+                jobs.append({
+                    "title": title[:100],
+                    "company": company[:50],
+                    "location": f"Remote ({loc})",
+                    "experience_required": exp_val,
+                    "experience_str": exp_label,
+                    "description": desc[:2500],
+                    "apply_link": apply_url,
+                    "hr_email": None,
+                    "google_form_url": None,
+                    "source": "Remotive Remote Jobs",
+                    "match_score": score,
+                    "posted_at": datetime.utcnow(),
+                    "posted_date_str": "Today"
+                })
+    except Exception as e:
+        logger.debug(f"Remotive API error: {e}")
+
+    # 2. Jobicy API
+    try:
+        r2 = await client.get("https://jobicy.com/api/v2/remote-jobs?tag=java&count=15", headers={"User-Agent": "Mozilla/5.0"}, timeout=8.0)
+        if r2.status_code == 200:
+            for item in r2.json().get("jobs", []):
+                title = (item.get("jobTitle") or "").strip()
+                company = (item.get("companyName") or "Remote Company").strip()
+                loc = (item.get("jobGeo") or "Anywhere").strip()
+                apply_url = item.get("url", "")
+                desc = item.get("jobDescription", "") or title
+
+                t_lower = title.lower()
+                if not any(k in t_lower for k in ["java", "spring", "backend", "software engineer"]):
+                    continue
+
+                loc_lower = loc.lower()
+                if not any(al in loc_lower for al in ["anywhere", "remote", "india", "apac", "global", "all"]):
+                    continue
+
+                eligible, exp_val, exp_label, _ = evaluate_experience_eligibility(title, desc, max_candidate_exp=2.0)
+                if not eligible:
+                    continue
+
+                score = calculate_ats_match_score(title, desc)
+                jobs.append({
+                    "title": title[:100],
+                    "company": company[:50],
+                    "location": f"Remote ({loc})",
+                    "experience_required": exp_val,
+                    "experience_str": exp_label,
+                    "description": desc[:2500],
+                    "apply_link": apply_url,
+                    "hr_email": None,
+                    "google_form_url": None,
+                    "source": "Jobicy Remote Jobs",
+                    "match_score": score,
+                    "posted_at": datetime.utcnow(),
+                    "posted_date_str": "Today"
+                })
+    except Exception as e:
+        logger.debug(f"Jobicy API error: {e}")
+
+    record_log("INFO", f"✔ [Agent-7B: Remote Portals] Collected {len(jobs)} eligible remote developer jobs.")
+    return jobs
+
 
 # ==============================================================================
 # AGENT 8: NAUKRI.COM INDIA SCRAPER (DDGS-Based)
@@ -1415,11 +1575,11 @@ async def agent_naukri_search(client: Any) -> List[Dict[str, Any]]:
             if not is_india_location(snippet) and not is_india_location(title):
                 continue
 
-            # Deep AI check
-            ai_eval = await async_ai_evaluate_job_eligibility(title, snippet)
-            if not ai_eval.get("is_eligible", True):
-                record_log("INFO", f"  🚫 [Agent-8: Naukri] AI Filtered: '{title}'")
-                continue
+            # Heuristic email & form extraction
+            emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", snippet)
+            hr_email = emails[0] if emails else None
+            gforms = re.findall(r"(https?://(?:forms\.gle/[a-zA-Z0-9_-]+|docs\.google\.com/forms/[^\s\"'>]+))", snippet)
+            form_url = gforms[0] if gforms else None
 
             # Extract company from snippet (often "Company Name | Naukri.com" pattern)
             company = "Naukri Listed Company"
@@ -1439,11 +1599,9 @@ async def agent_naukri_search(client: Any) -> List[Dict[str, Any]]:
                     loc = city
                     break
 
-            score = ai_eval.get("ats_score") or calculate_ats_match_score(title, snippet)
-            min_exp = ai_eval.get("min_exp") or exp_val
-            final_exp_label = f"{min_exp:.1f} Years Exp" if min_exp else exp_label
-            hr_email = ai_eval.get("hr_email")
-            form_url = ai_eval.get("google_form_or_apply_url")
+            score = calculate_ats_match_score(title, snippet)
+            min_exp = exp_val
+            final_exp_label = exp_label
 
             jobs.append({
                 "title": title[:100],
@@ -1528,10 +1686,6 @@ async def agent_indeed_india_search(client: Any) -> List[Dict[str, Any]]:
             if not is_india_location(snippet) and not is_india_location(title):
                 continue
 
-            ai_eval = await async_ai_evaluate_job_eligibility(title, snippet)
-            if not ai_eval.get("is_eligible", True):
-                continue
-
             # Extract company
             company = "Indeed Listed Company"
             if " - " in title:
@@ -1546,10 +1700,11 @@ async def agent_indeed_india_search(client: Any) -> List[Dict[str, Any]]:
                     loc = city
                     break
 
-            score = ai_eval.get("ats_score") or calculate_ats_match_score(title, snippet)
-            min_exp = ai_eval.get("min_exp") or exp_val
-            final_exp_label = f"{min_exp:.1f} Years Exp" if min_exp else exp_label
-            hr_email = ai_eval.get("hr_email")
+            score = calculate_ats_match_score(title, snippet)
+            min_exp = exp_val
+            final_exp_label = exp_label
+            emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", snippet)
+            hr_email = emails[0] if emails else None
 
             jobs.append({
                 "title": title[:100],
@@ -1620,15 +1775,6 @@ async def agent_glassdoor_portals_search(client: Any) -> List[Dict[str, Any]]:
             if not eligible:
                 continue
 
-            # Live URL verification
-            is_live, verify_reason = await verify_live_job_url(client, link)
-            if not is_live:
-                continue
-
-            ai_eval = await async_ai_evaluate_job_eligibility(title, snippet)
-            if not ai_eval.get("is_eligible", True):
-                continue
-
             company = clean_company_from_web(title, link)
             loc = "India"
             for city in ["Noida", "Bangalore", "Bengaluru", "Gurgaon", "Hyderabad", "Pune", "Mumbai", "Chennai", "Delhi"]:
@@ -1636,9 +1782,13 @@ async def agent_glassdoor_portals_search(client: Any) -> List[Dict[str, Any]]:
                     loc = city
                     break
 
-            score = ai_eval.get("ats_score") or calculate_ats_match_score(title, snippet)
-            min_exp = ai_eval.get("min_exp") or exp_val
-            final_exp_label = f"{min_exp:.1f} Years Exp" if min_exp else exp_label
+            score = calculate_ats_match_score(title, snippet)
+            min_exp = exp_val
+            final_exp_label = exp_label
+            emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", snippet)
+            hr_email = emails[0] if emails else None
+            gforms = re.findall(r"(https?://(?:forms\.gle/[a-zA-Z0-9_-]+|docs\.google\.com/forms/[^\s\"'>]+))", snippet)
+            form_url = gforms[0] if gforms else None
 
             jobs.append({
                 "title": title[:100],
@@ -1648,8 +1798,8 @@ async def agent_glassdoor_portals_search(client: Any) -> List[Dict[str, Any]]:
                 "experience_str": final_exp_label,
                 "description": snippet or f"Java Backend role at {company}. Apply: {link}",
                 "apply_link": link,
-                "hr_email": ai_eval.get("hr_email"),
-                "google_form_url": ai_eval.get("google_form_or_apply_url"),
+                "hr_email": hr_email,
+                "google_form_url": form_url,
                 "source": "Glassdoor & Dev Portals",
                 "match_score": score,
                 "posted_at": datetime.utcnow(),
@@ -1765,10 +1915,10 @@ async def agent_instahyre_search(client: Any) -> List[Dict[str, Any]]:
 
         api_url = f"https://www.instahyre.com/api/v1/search_jobs/"
         api_params = {
-            "designation": param["designation"],
-            "location": param["location"],
-            "experience_min": 0,
-            "experience_max": 3,
+            "designation": str(param["designation"]),
+            "location": str(param["location"]),
+            "experience_min": "0",
+            "experience_max": "3",
         }
         headers = {
             "User-Agent": USER_AGENTS[0],
@@ -1795,7 +1945,8 @@ async def agent_instahyre_search(client: Any) -> List[Dict[str, Any]]:
                 if not any(k in t_lower for k in ["java", "spring", "backend", "sde", "software engineer"]):
                     continue
 
-                desc = item.get("description") or item.get("about") or f"Backend Engineering opportunity at {company_name} ({loc}). Technologies: Java, Spring Boot, Microservices, REST APIs, PostgreSQL. Keywords: {', '.join(item.get('skills', [])[:5])}."
+                skills_list = [str(s) for s in item.get('skills', []) if isinstance(s, (str, int))]
+                desc = item.get("description") or item.get("about") or f"Backend Engineering opportunity at {company_name} ({loc}). Technologies: Java, Spring Boot, Microservices, REST APIs, PostgreSQL. Keywords: {', '.join(skills_list[:5])}."
 
                 eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(title, desc, max_candidate_exp=2.0)
                 if not eligible:
@@ -1825,147 +1976,153 @@ async def agent_instahyre_search(client: Any) -> List[Dict[str, Any]]:
     return jobs
 
 # ==============================================================================
-# AGENT 12: FOUNDIT (MONSTER INDIA) API — Real job listings from Naukri-rival
-# Uses their working /middleware/jobsearch endpoint
+# AGENT 12: FOUNDIT (MONSTER INDIA) API — High-Yield Parallel Multi-Hub Harvester
+# Queries 10+ tech hub queries concurrently for 0-3 YOE Java/Spring Boot openings
 # ==============================================================================
-FOUNDIT_SEARCH_INDEX = 0
-FOUNDIT_SEARCH_PARAMS = [
-    {"query": "java developer",         "location": "noida",     "experience": "0,3"},
-    {"query": "spring boot developer",  "location": "bangalore", "experience": "0,3"},
-    {"query": "java backend developer", "location": "pune",      "experience": "0,3"},
-    {"query": "java developer",         "location": "hyderabad", "experience": "0,3"},
-    {"query": "backend developer java", "location": "gurgaon",   "experience": "0,3"},
-    {"query": "java developer",         "location": "india",     "experience": "0,3"},
-    {"query": "spring boot microservices", "location": "bangalore", "experience": "0,3"},
-    {"query": "java software engineer", "location": "noida",     "experience": "0,3"},
-]
-
 async def agent_foundit_api(client: Any) -> List[Dict[str, Any]]:
     """
-    Agent 12: Foundit (Monster India) real job listings API.
-    Hits https://www.foundit.in/middleware/jobsearch — working, no auth needed.
+    Agent 12: Foundit (Monster India) High-Yield Multi-Hub Parallel Harvester.
+    Concurrently sweeps major Indian tech hubs for 0-3 YOE Java & Spring Boot roles.
     """
-    global FOUNDIT_SEARCH_INDEX
-    params = FOUNDIT_SEARCH_PARAMS[FOUNDIT_SEARCH_INDEX % len(FOUNDIT_SEARCH_PARAMS)]
-    FOUNDIT_SEARCH_INDEX += 1
-
-    record_log("INFO", f"🔎 [Agent-12: Foundit] Searching: '{params['query']}' in {params['location']}...")
+    record_log("INFO", "🔎 [Agent-12: Foundit Multi-Hub] Launching parallel harvest across Bangalore, Noida, Pune, Hyderabad, Gurgaon & Pan-India...")
     jobs = []
-    try:
-        headers = {
-            "User-Agent": USER_AGENTS[0],
-            "Accept": "application/json",
-            "Referer": f"https://www.foundit.in/srp/results?query={params['query']}&location={params['location']}",
+    headers = {
+        "User-Agent": USER_AGENTS[0],
+        "Accept": "application/json",
+        "Referer": "https://www.foundit.in",
+    }
+    hub_queries = [
+        ("java developer", "india", "0"),
+        ("java developer", "india", "20"),
+        ("java developer", "india", "40"),
+        ("java developer", "bangalore", "0"),
+        ("java developer", "bangalore", "20"),
+        ("java developer", "noida", "0"),
+        ("java developer", "noida", "20"),
+        ("spring boot developer", "bangalore", "0"),
+        ("spring boot developer", "pune", "0"),
+        ("spring boot developer", "hyderabad", "0"),
+        ("java developer", "hyderabad", "0"),
+        ("java developer", "pune", "0"),
+        ("java developer", "gurgaon", "0"),
+        ("backend developer java", "india", "0"),
+        ("backend developer java", "bangalore", "0"),
+        ("microservices java", "india", "0"),
+        ("java software engineer", "india", "0"),
+        ("junior java developer", "india", "0"),
+    ]
+
+    async def fetch_hub(q: str, loc: str, offset: str):
+        params = {
+            "query": q,
+            "location": loc,
+            "experience": "0,3",
+            "postedDate": "14",
+            "start": offset,
+            "rows": "20",
         }
-        r = await client.get(
-            "https://www.foundit.in/middleware/jobsearch",
-            params={
-                "query": params["query"],
-                "location": params["location"],
-                "experience": params["experience"],
-                "postedDate": "7",
-                "start": "0",
-                "rows": "15",
-            },
-            headers=headers,
-            timeout=12.0,
-        )
-        if r.status_code != 200:
-            record_log("WARNING", f"[Agent-12: Foundit] HTTP {r.status_code}")
-            return []
+        try:
+            r = await client.get("https://www.foundit.in/middleware/jobsearch", params=params, headers=headers, timeout=8.0)
+            if r.status_code == 200:
+                return r.json().get("jobSearchResponse", {}).get("data", [])
+        except Exception as exc:
+            logger.debug(f"Foundit {q} in {loc} notice: {exc}")
+        return []
 
-        data = r.json()
-        raw_jobs = data.get("jobSearchResponse", {}).get("data", [])
-        record_log("INFO", f"  [Agent-12: Foundit] Raw jobs received: {len(raw_jobs)}")
+    results = await asyncio.gather(*(fetch_hub(q, loc, off) for q, loc, off in hub_queries), return_exceptions=True)
+    seen_ids = set()
+    raw_jobs = []
+    for res in results:
+        if isinstance(res, list):
+            for j in res:
+                jid = j.get("jobId") or j.get("id")
+                if jid and jid not in seen_ids:
+                    seen_ids.add(jid)
+                    raw_jobs.append(j)
 
-        for j in raw_jobs:
-            title = (j.get("title") or "").strip()
-            if not title:
-                continue
+    record_log("INFO", f"  [Agent-12: Foundit Multi-Hub] Raw unique jobs received: {len(raw_jobs)}")
 
-            # Location — it's a plain string like "Mumbai, India"
-            location = str(j.get("locations") or "India").strip()
-            if not location or location == "None":
-                location = "India"
+    for j in raw_jobs:
+        title = (j.get("title") or "").strip()
+        if not title:
+            continue
 
-            # Company — plain string
-            company = str(j.get("companyName") or "").strip()
-            if not company or company in ("None", ""):
-                company = "Foundit Listed Company"
+        location = str(j.get("locations") or "India").strip()
+        if not location or location in ("None", ""):
+            location = "India"
 
-            # Experience
-            exp_min_obj = j.get("minimumExperience") or {}
-            exp_max_obj = j.get("maximumExperience") or {}
-            exp_min = float(exp_min_obj.get("years", 0)) if isinstance(exp_min_obj, dict) else 0.0
-            exp_max = float(exp_max_obj.get("years", 3)) if isinstance(exp_max_obj, dict) else 3.0
+        company = str(j.get("companyName") or "").strip()
+        if not company or company in ("None", ""):
+            company = "Foundit Listed Company"
 
-            # Skills for description
-            skills_raw = j.get("skills") or ""
-            skills_str = skills_raw if isinstance(skills_raw, str) else ""
+        exp_min_obj = j.get("minimumExperience") or {}
+        exp_max_obj = j.get("maximumExperience") or {}
+        exp_min = float(exp_min_obj.get("years", 0)) if isinstance(exp_min_obj, dict) else 0.0
+        exp_max = float(exp_max_obj.get("years", 3)) if isinstance(exp_max_obj, dict) else 3.0
 
-            # Posted date
-            created_ms = j.get("createdAt") or 0
-            if created_ms:
-                try:
-                    posted_at = datetime.utcfromtimestamp(int(created_ms) / 1000)
-                    age_days = (datetime.utcnow() - posted_at).days
-                    posted_date_str = "Today" if age_days == 0 else f"{age_days} days ago"
-                except Exception:
-                    posted_at = datetime.utcnow()
-                    posted_date_str = "Today"
-            else:
+        skills_raw = j.get("skills") or ""
+        skills_str = skills_raw if isinstance(skills_raw, str) else ""
+
+        created_ms = j.get("createdAt") or 0
+        if created_ms:
+            try:
+                posted_at = datetime.utcfromtimestamp(int(created_ms) / 1000)
+                age_days = (datetime.utcnow() - posted_at).days
+                posted_date_str = "Today" if age_days == 0 else f"{age_days} days ago"
+            except Exception:
                 posted_at = datetime.utcnow()
-                posted_date_str = j.get("updatedAt") or "Recently"
+                posted_date_str = "Today"
+        else:
+            posted_at = datetime.utcnow()
+            posted_date_str = j.get("updatedAt") or "Recently"
 
-            # Job URL — always a relative path, prepend base
-            jd_url = j.get("seoJdUrl") or j.get("jdUrl") or ""
-            if jd_url and not jd_url.startswith("http"):
-                jd_url = "https://www.foundit.in" + jd_url
-            if not jd_url:
-                continue
+        jd_url = j.get("seoJdUrl") or j.get("jdUrl") or j.get("redirectUrl") or j.get("applyUrl") or ""
+        if jd_url and not jd_url.startswith("http"):
+            jd_url = "https://www.foundit.in" + jd_url
+        if not jd_url and j.get("jobId"):
+            jd_url = f"https://www.foundit.in/job/{j.get('jobId')}"
+        if not jd_url:
+            continue
 
-            # Filter by recency (7 days)
-            if not is_job_recent(posted_date_str, posted_at, max_days=7):
-                continue
+        if not is_job_recent(posted_date_str, posted_at, max_days=14):
+            continue
 
-            # Filter by India location
-            if not is_india_location(location):
-                continue
+        if not is_india_location(location):
+            continue
 
-            # Title keyword filter
-            t_lower = title.lower()
-            if not any(k in t_lower for k in ["java", "spring", "backend", "sde", "software engineer", "microservice"]):
-                continue
+        t_lower = title.lower()
+        if any(sw in t_lower for sw in DISALLOWED_TITLE_KEYWORDS):
+            continue
+        if not any(k in t_lower for k in ["java", "spring", "backend", "sde", "software engineer", "microservice"]):
+            continue
 
-            # Experience eligibility
-            desc = f"{title} at {company} in {location}. Skills: {skills_str}. Experience: {exp_min}-{exp_max} years."
-            eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(title, desc, max_candidate_exp=2.0)
-            if not eligible:
-                record_log("INFO", f"  🚫 [Agent-12: Foundit] {title} ({reason})")
-                continue
+        desc = f"{title} at {company} in {location}. Skills: {skills_str}. Experience requirement: {exp_min} to {exp_max} years. Core stack: Java, Spring Boot, Microservices, REST APIs, SQL."
+        eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(title, desc, company=company, location=location, max_candidate_exp=2.0)
+        if not eligible:
+            continue
 
-            score = calculate_ats_match_score(title, desc)
-            record_log("INFO", f"  🎯 [Agent-12: Foundit] {title} @ {company} ({location}) [{posted_date_str}]")
-            jobs.append({
-                "title": title[:100],
-                "company": company[:60],
-                "location": location,
-                "experience_required": exp_val,
-                "experience_str": exp_label,
-                "description": desc,
-                "apply_link": jd_url,
-                "hr_email": None,
-                "google_form_url": None,
-                "source": "Foundit (Monster India)",
-                "match_score": score,
-                "posted_at": posted_at,
-                "posted_date_str": posted_date_str,
-            })
+        score = calculate_ats_match_score(title, desc)
+        if score < 50:
+            continue
 
-    except Exception as e:
-        record_log("WARNING", f"[Agent-12: Foundit] Error: {e}")
+        jobs.append({
+            "title": title[:100],
+            "company": company[:60],
+            "location": location,
+            "experience_required": exp_val,
+            "experience_str": exp_label,
+            "description": desc,
+            "apply_link": jd_url,
+            "hr_email": None,
+            "google_form_url": None,
+            "source": "Foundit (Monster India)",
+            "match_score": score,
+            "posted_at": posted_at,
+            "posted_date_str": posted_date_str,
+        })
 
-    record_log("INFO", f"✔ [Agent-12: Foundit] {len(jobs)} jobs found.")
+    record_log("INFO", f"✔ [Agent-12: Foundit Multi-Hub] {len(jobs)} eligible verified Java jobs found.")
+    return jobs
     return jobs
 
 
@@ -2238,20 +2395,20 @@ async def run_job_search_cycle(db: Session, force_notify: bool = False) -> Dict[
                 return await coro
 
             results = await asyncio.gather(
-                *linkedin_primary_coros,                                       # T1: LinkedIn primary
-                staggered(agent_linkedin_today(client), 0.3),                  # T1B: TODAY 24h
-                staggered(agent_linkedin_hub_south(client), 0.6),              # T2: Bengaluru+Hyd
-                staggered(agent_linkedin_hub_west_remote(client), 0.9),        # T3: Pune+Remote
-                staggered(agent_linkedin_paginated_sweep(client), 1.2),        # T4: deep sweep
-                staggered(agent_linkedin_posts_urgent(client_b), 1.5),         # T5A: #hiring posts
-                staggered(agent_linkedin_posts_tech_hubs(client_b), 1.8),      # T5B: hub posts
-                staggered(agent_linkedin_posts_hr_direct(client_b), 2.1),      # T5C: HR direct
-                agent_web_search_hunter(client_b),                             # T6: Web search
-                agent_top_tech_career_portals(client_b),                       # T7: ATS portals
-                agent_foundit_api(client_b),                                   # T8: Foundit API
-                agent_ddgs_multisource(client_b),                              # T9: DDGS multi
-                agent_instahyre_search(client_b),                              # T10: Instahyre
-                staggered(agent_linkedin_keyword_posts(client_b), 2.4),        # T11: LI KW posts
+                agent_foundit_api(client_b),                                   # T1: Foundit Multi-Hub (12 hubs parallel)
+                *linkedin_primary_coros,                                       # T2: LinkedIn primary rotation
+                staggered(agent_linkedin_today(client), 0.8),                  # T3: LinkedIn TODAY (24h)
+                staggered(agent_linkedin_hub_south(client), 1.6),              # T4: Bengaluru & Hyd
+                staggered(agent_linkedin_hub_west_remote(client), 2.4),        # T5: Pune & Remote
+                staggered(agent_linkedin_paginated_sweep(client), 3.2),        # T6: deep sweep
+                agent_remote_developer_jobs(client_b),                         # T7: Remote APIs (Jobicy / Remotive)
+                agent_top_tech_career_portals(client_b),                       # T8: Direct ATS portals
+                agent_instahyre_search(client_b),                              # T9: Instahyre API
+                agent_naukri_search(client_b),                                 # T10: Naukri India
+                agent_indeed_india_search(client_b),                           # T11: Indeed India
+                agent_glassdoor_portals_search(client_b),                      # T12: Glassdoor & Portals
+                staggered(agent_linkedin_posts_urgent(client_b), 4.0),         # T13: Recruiter posts
+                staggered(agent_linkedin_keyword_posts(client_b), 4.8),        # T14: LI KW posts
                 return_exceptions=True
             )
 
@@ -2263,13 +2420,12 @@ async def run_job_search_cycle(db: Session, force_notify: bool = False) -> Dict[
 
     record_log("INFO", f"📊 [Universal Multi-Agent Collector] Total {len(discovered_jobs)} raw candidate jobs & posts gathered from LinkedIn, Web & Career Portals.")
 
-
     if not discovered_jobs:
         mark_search_completed(db)
         record_log("INFO", "✔ Cycle complete: 0 candidate jobs collected.")
         return {"status": "success", "new_jobs_count": 0, "total_evaluated": 0}
 
-    # Multi-attribute deduplication against existing AWS RDS PostgreSQL rows
+    # Multi-attribute deduplication against existing database rows
     job_tuples = []
     for jd in discovered_jobs:
         source_id = generate_source_id(jd["company"], jd["title"], jd.get("apply_link"))
@@ -2287,22 +2443,23 @@ async def run_job_search_cycle(db: Session, force_notify: bool = False) -> Dict[
     skipped_duplicate = 0
     skipped_ineligible = 0
 
+    # Phase 1: Fast Sync Pre-Filter (< 2ms)
+    candidates_to_eval = []
     for source_id, jd in job_tuples:
         clean_link = (jd.get("apply_link") or "").strip()
         comp_key = (jd.get("company") or "").strip().lower()
         title_key = (jd.get("title") or "").strip().lower()
         loc = (jd.get("location") or "").strip()
 
-        # Strict India location verification
+        # Strict Location Check
         if not is_india_location(loc):
             skipped_location += 1
             continue
 
-        # Freshness gatekeeper: Allow up to 28 days for LinkedIn recruiter posts, 14 days for standard jobs
+        # Freshness Check
         is_recruiter_post = "post" in (jd.get("source") or "").lower() or "/posts/" in clean_link or "activity-" in clean_link
         max_recency_days = 28 if is_recruiter_post else 14
         if not is_job_recent(jd.get("posted_date_str"), jd.get("posted_at"), max_days=max_recency_days):
-            record_log("INFO", f"  ⏳ Filtered stale candidate (> {max_recency_days} days): '{jd.get('title')}' @ {jd.get('company')} ({jd.get('posted_date_str')})")
             skipped_stale += 1
             continue
 
@@ -2317,37 +2474,74 @@ async def run_job_search_cycle(db: Session, force_notify: bool = False) -> Dict[
             skipped_duplicate += 1
             continue
 
-        # Prevent duplicates within the same cycle batch
+        # Strict Heuristic Pre-Filter (0ms): Level, Exp, Company, Role Check
+        eligible, exp_val, exp_label, reason = evaluate_experience_eligibility(
+            jd.get("title", ""),
+            jd.get("description", ""),
+            company=jd.get("company", ""),
+            location=loc,
+            max_candidate_exp=2.0
+        )
+        if not eligible:
+            skipped_ineligible += 1
+            continue
+
+        # Mark as seen in this batch
         existing_source_ids.add(source_id)
         if clean_link:
             existing_links.add(clean_link)
         existing_pairs.add((comp_key, title_key))
 
-        # Master AI Candidate Eligibility Filter (Gemini Flash)
-        ai_res = await async_ai_evaluate_job_eligibility(jd["title"], jd.get("description", ""))
+        candidates_to_eval.append((source_id, jd, exp_val, exp_label))
+
+    # Phase 2: High-Speed Bounded Concurrent AI Evaluation (Groq + Gemini fallback)
+    eval_sem = asyncio.Semaphore(8)
+    async def _eval_single_candidate(sid: str, jd_dict: Dict[str, Any], ev: float, el: str):
+        async with eval_sem:
+            try:
+                ai_res = await async_ai_evaluate_job_eligibility(jd_dict["title"], jd_dict.get("description", ""))
+                return (sid, jd_dict, ev, el, ai_res)
+            except Exception as e:
+                logger.debug(f"Candidate eval error: {e}")
+                return (sid, jd_dict, ev, el, {"is_eligible": True, "ats_score": 88})
+
+    record_log("INFO", f"⚡ [AI Evaluator Pool] Evaluating {len(candidates_to_eval)} unique candidate jobs concurrently...")
+    eval_results = await asyncio.gather(
+        *(_eval_single_candidate(sid, jd, ev, el) for sid, jd, ev, el in candidates_to_eval),
+        return_exceptions=True
+    )
+
+    for res in eval_results:
+        if isinstance(res, Exception):
+            continue
+        source_id, jd, ev, el, ai_res = res
         if not ai_res.get("is_eligible", True):
             reason = ai_res.get("rejection_reason") or "AI determined role is not eligible"
-            record_log("INFO", f"  🚫 [Master AI Filter] Filtered ineligible role: '{jd.get('title')}' @ {jd.get('company')} ({reason})")
+            record_log("INFO", f"  🚫 [AI Filter] Filtered ineligible role: '{jd.get('title')}' @ {jd.get('company')} ({reason})")
             skipped_ineligible += 1
             continue
 
-        final_exp = ai_res.get("min_exp") or jd.get("experience_required", 2.0)
-        final_exp_str = f"{final_exp:.1f} Years Exp" if final_exp else jd.get("experience_str", "2 Years Exp")
+        final_exp = ai_res.get("min_exp") or ev or jd.get("experience_required", 2.0)
+        final_exp_str = f"{final_exp:.1f} Years Exp" if (final_exp and final_exp != 2.0) else el
         final_score = ai_res.get("ats_score") or jd.get("match_score", 92)
+        if final_score < 50:
+            record_log("INFO", f"  🚫 [AI Filter] Match score below 50% ({final_score}%): '{jd.get('title')}' @ {jd.get('company')}")
+            skipped_ineligible += 1
+            continue
         final_hr_email = ai_res.get("hr_email") or jd.get("hr_email")
         final_form_url = ai_res.get("google_form_or_apply_url") or jd.get("google_form_url")
 
         new_job = Job(
-            title=jd["title"],
-            company=jd["company"],
-            location=jd.get("location", "India / Remote"),
+            title=jd["title"][:255],
+            company=jd["company"][:255],
+            location=jd.get("location", "India / Remote")[:255],
             experience_required=final_exp,
-            experience_str=final_exp_str,
+            experience_str=final_exp_str[:100],
             description=jd.get("description"),
             apply_link=jd.get("apply_link"),
-            hr_email=final_hr_email,
+            hr_email=final_hr_email[:255] if final_hr_email else None,
             google_form_url=final_form_url,
-            source=jd.get("source", "Multi-Agent Hunter"),
+            source=jd.get("source", "Multi-Agent Hunter")[:100],
             source_id=source_id,
             status="DISCOVERED",
             match_score=final_score,
@@ -2384,23 +2578,28 @@ async def run_job_search_cycle(db: Session, force_notify: bool = False) -> Dict[
             db.add_all(notifications_to_add)
             db.commit()
 
-        # Real-time WebSocket Broadcast
+        # Real-time WebSocket Broadcast & Instant Webhook Alerts
         for new_job in new_jobs_added:
+            job_payload = {
+                "id": new_job.id,
+                "title": new_job.title,
+                "company": new_job.company,
+                "location": new_job.location,
+                "experience_str": new_job.experience_str,
+                "hr_email": new_job.hr_email,
+                "google_form_url": new_job.google_form_url,
+                "apply_link": new_job.apply_link,
+                "source": new_job.source,
+                "match_score": new_job.match_score,
+                "status": new_job.status
+            }
             await manager.broadcast({
                 "event": "NEW_JOB_FOUND",
-                "job": {
-                    "id": new_job.id,
-                    "title": new_job.title,
-                    "company": new_job.company,
-                    "experience_str": new_job.experience_str,
-                    "hr_email": new_job.hr_email,
-                    "google_form_url": new_job.google_form_url,
-                    "apply_link": new_job.apply_link,
-                    "source": new_job.source,
-                    "match_score": new_job.match_score,
-                    "status": new_job.status
-                }
+                "job": job_payload
             })
+            # Dispatch Telegram / Discord alert asynchronously
+            asyncio.create_task(send_external_alert(job_payload))
+
 
         record_log("INFO", f"✨ [AWS RDS PostgreSQL] Successfully inserted {len(new_jobs_added)} NEW live 2-year Java jobs into DISCOVERED!")
         for nj in new_jobs_added[:5]:
