@@ -1,0 +1,141 @@
+# ========================================================
+# JobApplyApp - Git Ignore Configuration
+# ========================================================
+
+# --------------------------------------------------------
+# 1. Environment & Sensitive Credentials (CRITICAL)
+# --------------------------------------------------------
+.env
+.env.*
+*.env
+backend/.env
+frontend/.env
+*.local
+.env.local
+.env.*.local
+credentials.json
+client_secret*.json
+*.pem
+*.key
+*.cert
+*.crt
+
+# Keep example env files tracked
+!.env.example
+!backend/.env.example
+!frontend/.env.example
+
+# --------------------------------------------------------
+# 2. Database Files (Personal data & scraped records)
+# --------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+jobapply.db
+backend/jobapply.db
+
+# --------------------------------------------------------
+# 3. User Uploads, Resumes & Test Artifacts
+# --------------------------------------------------------
+backend/uploads/*
+!backend/uploads/.gitkeep
+!backend/uploads/tailored_resumes/
+backend/uploads/tailored_resumes/*
+!backend/uploads/tailored_resumes/.gitkeep
+backend/static/screenshots/*
+!backend/static/screenshots/.gitkeep
+
+# Ignore all personal PDF files & backup files
+*.pdf
+*.bak
+*.old
+
+# --------------------------------------------------------
+# 4. Python Virtual Environments & Bytecode
+# --------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+backend/venv/
+backend/.venv/
+env.bak/
+venv.bak/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --------------------------------------------------------
+# 5. Node.js & Frontend Artifacts
+# --------------------------------------------------------
+node_modules/
+frontend/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+frontend/dist/
+frontend/dist-ssr/
+dist/
+.vite/
+frontend/.vite/
+
+# --------------------------------------------------------
+# 6. IDE, Editors & OS Specific Files
+# --------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.swo
+*~
+
+# --------------------------------------------------------
+# 7. Logs & Temporary Files
+# --------------------------------------------------------
+*.log
+logs/
+tmp/
+temp/

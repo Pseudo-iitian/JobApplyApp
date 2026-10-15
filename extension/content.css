@@ -1,0 +1,259 @@
+/* JobApplyApp Floating Autofill Button & Toast Styles */
+
+#jobapply-autofill-fab-container {
+  position: fixed;
+  right: 22px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2147483647; /* Maximum z-index so it sits above all modal overlays */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  user-select: none;
+}
+
+#jobapply-autofill-fab {
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #0284c7 0%, #2563eb 50%, #7c3aed 100%);
+  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.45), 0 2px 8px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  border: 3px solid rgba(255, 255, 255, 0.9);
+  transition: all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  position: relative;
+  outline: none;
+}
+
+#jobapply-autofill-fab:hover {
+  transform: scale(1.12);
+  box-shadow: 0 12px 30px rgba(124, 58, 237, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
+  border-color: #38bdf8;
+}
+
+#jobapply-autofill-fab:active {
+  transform: scale(0.95);
+}
+
+#jobapply-autofill-fab svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+  transition: transform 0.3s ease;
+}
+
+#jobapply-autofill-fab:hover svg {
+  transform: rotate(15deg);
+}
+
+/* Pulsing outer ring to draw attention */
+#jobapply-autofill-fab::after {
+  content: '';
+  position: absolute;
+  top: -4px;
+  left: -4px;
+  right: -4px;
+  bottom: -4px;
+  border-radius: 50%;
+  border: 2px solid rgba(56, 189, 248, 0.7);
+  animation: jobapply-pulse 2.2s infinite;
+  pointer-events: none;
+}
+
+@keyframes jobapply-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  50% {
+    transform: scale(1.22);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+/* Floating Tooltip */
+#jobapply-autofill-tooltip {
+  position: absolute;
+  right: 70px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  transform: translateY(-50%) translateX(10px);
+}
+
+#jobapply-autofill-fab-container:hover #jobapply-autofill-tooltip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+/* Toast Notification on Successful Fill */
+#jobapply-autofill-toast {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  background: #0f172a;
+  color: #ffffff;
+  padding: 16px 20px;
+  border-radius: 16px;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.6), 0 0 20px rgba(14, 165, 233, 0.25);
+  z-index: 2147483647;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 380px;
+  animation: jobapply-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+@keyframes jobapply-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.jobapply-field-highlight {
+  transition: box-shadow 0.4s ease, border-color 0.4s ease !important;
+  box-shadow: 0 0 0 2px #10b981 !important;
+  border-color: #10b981 !important;
+}
+
+/* LinkedIn Hunter Bot Floating Control Widget */
+#jobapply-linkedin-hunter-bar {
+  position: fixed;
+  top: 64px;
+  right: 20px;
+  z-index: 2147483646;
+  background: #0f172a;
+  border: 1px solid #0284c7;
+  border-radius: 14px;
+  padding: 12px 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6), 0 0 15px rgba(2, 132, 199, 0.35);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #f8fafc;
+  width: 280px;
+  transition: all 0.3s ease;
+}
+
+.jobapply-hunter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #1e293b;
+}
+
+.jobapply-hunter-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: #38bdf8;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.jobapply-hunter-stats {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.jobapply-hunter-actions {
+  display: flex;
+  gap: 6px;
+  flex-direction: column;
+}
+
+.jobapply-hunter-btn {
+  background: #0284c7;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.jobapply-hunter-btn:hover {
+  background: #0369a1;
+}
+
+.jobapply-hunter-btn-active {
+  background: #10b981 !important;
+}
+
+.jobapply-discovered-post {
+  border: 2px solid #0284c7 !important;
+  box-shadow: 0 0 18px rgba(2, 132, 199, 0.35) !important;
+  position: relative !important;
+  border-radius: 10px !important;
+}
+
+.jobapply-post-badge {
+  background: linear-gradient(135deg, #0369a1, #1d4ed8);
+  color: #ffffff;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 6px 12px;
+  box-shadow: 0 4px 12px rgba(2, 132, 199, 0.3);
+}
+
+.jobapply-stream-tab {
+  transition: all 0.2s ease !important;
+}
+
+.jobapply-stream-tab:hover {
+  background: #334155 !important;
+  color: #ffffff !important;
+  border-color: #38bdf8 !important;
+}
+
+.jobapply-stream-tab-active {
+  background: #0284c7 !important;
+  color: #ffffff !important;
+  border-color: #38bdf8 !important;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.4) !important;
+}
+

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>JobApplyApp 1-Click Autofill</title>
+  <style>
+    body {
+      width: 320px;
+      margin: 0;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid #1e293b;
+      padding-bottom: 12px;
+      margin-bottom: 14px;
+    }
+    .logo-badge {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #0284c7, #7c3aed);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 16px;
+    }
+    .title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #ffffff;
+      margin: 0;
+    }
+    .subtitle {
+      font-size: 11px;
+      color: #38bdf8;
+      margin: 0;
+    }
+    .btn-autofill {
+      width: 100%;
+      background: linear-gradient(135deg, #0284c7 0%, #2563eb 50%, #7c3aed 100%);
+      color: #ffffff;
+      border: none;
+      padding: 12px;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 4px 15px rgba(37, 99, 235, 0.4);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .btn-autofill:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(124, 58, 237, 0.5);
+    }
+    .btn-autofill:active {
+      transform: translateY(1px);
+    }
+    .profile-card {
+      background: #1e293b;
+      border-radius: 12px;
+      padding: 12px;
+      margin-top: 14px;
+      font-size: 11px;
+      line-height: 1.6;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      color: #cbd5e1;
+      padding: 2px 0;
+    }
+    .row span:first-child {
+      color: #94a3b8;
+    }
+    .pill {
+      display: inline-block;
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+    .tip {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 12px;
+      text-align: center;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo-badge">⚡</div>
+    <div>
+      <h3 class="title">JobApplyApp Autofill</h3>
+      <p class="subtitle">Candidate: Abhishek Verma (Rapipay)</p>
+    </div>
+  </div>
+
+  <button id="btn-trigger" class="btn-autofill">
+    <span>✨ Autofill This Page Now</span>
+  </button>
+
+  <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 6px;">
+    <button id="btn-linkedin-autohunt" style="width: 100%; background: linear-gradient(135deg, #10b981, #0284c7); color: white; border: none; padding: 10px; border-radius: 10px; font-size: 12px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35);">
+      <span>🚀 Auto-Hunt 3 Java Streams (Loop & Refresh)</span>
+    </button>
+    <div style="display:flex; gap:4px;">
+      <button id="btn-stream-java-backend" style="flex:1; background:#1e293b; color:#38bdf8; border:1px solid #334155; padding:6px 2px; border-radius:8px; font-size:10px; font-weight:700; cursor:pointer;" title="Search Java Backend Developer Posts">
+        ☕ Java Backend
+      </button>
+      <button id="btn-stream-java-dev" style="flex:1; background:#1e293b; color:#38bdf8; border:1px solid #334155; padding:6px 2px; border-radius:8px; font-size:10px; font-weight:700; cursor:pointer;" title="Search Java Developer Posts">
+        ⚡ Java Dev
+      </button>
+      <button id="btn-stream-software-eng" style="flex:1; background:#1e293b; color:#38bdf8; border:1px solid #334155; padding:6px 2px; border-radius:8px; font-size:10px; font-weight:700; cursor:pointer;" title="Search Software Engineer Java Posts">
+        💻 Software Eng
+      </button>
+    </div>
+  </div>
+
+  <div class="profile-card">
+    <div class="row"><span>Name:</span> <strong>Abhishek Verma</strong></div>
+    <div class="row"><span>Exp:</span> <span class="pill">2+ Years (Java/Spring)</span></div>
+    <div class="row"><span>Company:</span> <strong>Rapipay Fintech</strong></div>
+    <div class="row"><span>Notice:</span> <span class="pill">30 Days (Serving)</span></div>
+    <div class="row"><span>Current / Exp CTC:</span> <strong>9.5 / 15 LPA</strong></div>
+    <div class="row"><span>Location:</span> <strong>Noida, UP</strong></div>
+  </div>
+
+  <p class="tip">
+    💡 You can also simply click the <strong>round floating icon</strong> on the right edge of any job webpage!
+  </p>
+
+  <script src="popup.js"></script>
+</body>
+</html>
